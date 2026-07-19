@@ -65,15 +65,17 @@ is sent literally, so raw ids still work if you don't want vars.
 **Commands are separated by `|`, not `;`.** Aardwolf's command stacking splits a
 typed `;` before the plugin ever sees it, so the pipe is the safe delimiter.
 
-Example — a magic-bus transport (held item, by object id), a plain recall, and a
-portal with an arrival line:
+Example — a plain recall, an academy portal (held item, ids in vars) with an
+arrival line, and a "get to the questor" combo:
 
 ```
-recallmanager add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
-recallmanager at  bus ^WHOOOOOOOOOOOOSH!$
-recallmanager add recall recall
-recallmanager add portal get 11111 67890|hold 11111|enter|put 11111 67890
-recallmanager at  portal ^Inside the Academy Foyer
+recallmanager var bag 3841471214
+recallmanager var academy 3841475716
+recallmanager var wep 3843558662
+recallmanager add "Recall Command" recall
+recallmanager add Academy get $academy $bag|hold $academy|enter|dual $wep|put $academy $bag
+recallmanager at Academy ^Inside the Academy Foyer$
+recallmanager add Quest get $academy $bag|hold $academy|enter|dual $wep|put $academy $bag|run d|runto quest
 ```
 
 Get an item's object id in-game with the `id` spell/command. Drag the window by
