@@ -21,6 +21,8 @@ file's plugins block.
 
 ### Recall Manager (`RecallManager.xml`)
 
+![Recall Manager miniwindow](screenshot/RecallManager.png)
+
 A miniwindow of **clickable buttons you build yourself** — each fires a list of
 commands. Good for recalls, portals, held-item transports, shop runs, anything
 you do the same way every time. Ships empty; nothing is assumed about your
