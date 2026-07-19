@@ -2,7 +2,7 @@
 <!DOCTYPE muclient>
 <muclient>
 <plugin
-   name="Recall_Manager"
+   name="Solao_Recall_Manager"
    author="Solao"
    id="64b14fbecdb8209f73c3af4b"
    language="Lua"
@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.4"
+   version="2.5"
 >
 <description trim="y">
 <![CDATA[
