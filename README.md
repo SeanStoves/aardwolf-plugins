@@ -31,7 +31,7 @@ The miniwindow shows `Recall Manager v<version>` on its title bar.
 Commands (type `recallmanager help`):
 
 ```
-recallmanager add <name> <cmd|cmd|...>    add a button
+recallmanager add <name> <cmd|cmd|...>    add a button (quote multi-word names)
 recallmanager edit <name> <cmd|cmd|...>   change a button's commands
 recallmanager del <name>                  remove a button
 recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>

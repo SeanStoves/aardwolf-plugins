@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.3"
+   version="2.4"
 >
 <description trim="y">
 <![CDATA[
@@ -19,7 +19,7 @@ button runs a list of commands separated by '|' (a pipe, NOT a semicolon --
 Aardwolf's command stacking would split a ';' before this plugin sees it).
 Ships empty; nothing is assumed about your character.
 
-  recallmanager add <name> <cmd|cmd|...>    add a button
+  recallmanager add <name> <cmd|cmd|...>    add a button (quote multi-word names)
   recallmanager edit <name> <cmd|cmd|...>   change a button's commands
   recallmanager del <name>                  remove a button
   recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
@@ -98,10 +98,23 @@ local MINW  = 150
 local hovered = nil
 local L = { width = MINW }             -- computed layout: width, title_h, fh, foot_y, rows[name]=y
 
-local function find (name)
+local function find (name)          -- case-insensitive; names may contain spaces
+   if not name then return end
+   local key = name:lower()
    for i, m in ipairs(cfg.methods) do
-      if m.name == name then return m, i end
+      if m.name:lower() == key then return m, i end
    end
+end
+
+-- pull a name off the front of a string. Quote it ('..' or "..") to allow spaces;
+-- otherwise it's the first whitespace-delimited token. Returns name, remainder.
+local function parse_name (s)
+   s = (s or ""):gsub("^%s+", "")
+   local q = s:sub(1, 1)
+   if q == "'" or q == '"' then
+      return s:match("^" .. q .. "([^" .. q .. "]*)" .. q .. "%s*(.*)$")
+   end
+   return s:match("^(%S+)%s*(.*)$")
 end
 
 local function repaint ()
@@ -112,7 +125,8 @@ end
 ----------------------------------------------------------------------
 -- runtime arrival triggers (one per method that defines an 'at' pattern)
 ----------------------------------------------------------------------
-local function trig_name (name) return "rm_at_" .. name end
+-- sanitize: names may contain spaces, but trigger names must be tame
+local function trig_name (name) return "rm_at_" .. name:gsub("%W", "_") end
 
 local function drop_trigger (name)
    DeleteTrigger(trig_name(name))       -- returns a code if absent; harmless
@@ -127,8 +141,12 @@ local function make_trigger (m)
 end
 
 function rm_arrived (tname)             -- global: named in AddTriggerEx
-   local m = find((tname:gsub("^rm_at_", "")))
-   if m then cfg.location = m.name; paint() end
+   -- match by trigger name (names sanitize lossily, so reverse-map by scanning)
+   for _, m in ipairs(cfg.methods) do
+      if m.at and trig_name(m.name) == tname then
+         cfg.location = m.name; paint(); return
+      end
+   end
 end
 
 ----------------------------------------------------------------------
@@ -250,6 +268,7 @@ local function help ()
    ColourNote("yellow","","recallmanager list | vars | reset | show | hide")
    ColourNote("yellow","","recallmanager factoryreset confirm       wipe ALL buttons + vars")
    ColourNote("silver","","use $name in a command to insert a var (e.g. get $bus $bag)")
+   ColourNote("silver","","quote multi-word button names: recallmanager add 'Clan Hall' recall")
 end
 
 local function list ()
@@ -264,8 +283,8 @@ local function list ()
    end
 end
 
-local function valid_name (n)
-   return n ~= nil and n:match("^[%w_]+$") ~= nil and not RESERVED[n:lower()]
+local function valid_name (n)          -- letters/digits/space/underscore/hyphen; not a reserved word
+   return n ~= nil and n ~= "" and n:match("^[%w][%w _%-]*$") ~= nil and not RESERVED[n:lower()]
 end
 
 function rm_cmd (name, line, wildcards)
@@ -274,19 +293,30 @@ function rm_cmd (name, line, wildcards)
       if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); repaint() end
       return
    end
-   local verb, rest = arg:match("^(%S+)%s*(.*)$")
-   verb = verb:lower()
+   local lverb = arg:match("^(%S+)"):lower()
 
-   if verb == "help" or verb == "?" then help()
-   elseif verb == "list"  then list()
-   elseif verb == "show"  then WindowShow(win, true); repaint()
-   elseif verb == "hide"  then WindowShow(win, false)
-   elseif verb == "reset" then
+   -- anything that isn't a management verb is a button name to fire (whole arg,
+   -- spaces allowed; surrounding quotes optional)
+   if not RESERVED[lverb] then
+      local fname = arg:gsub("^(['\"])(.*)%1$", "%2")
+      local m = find(fname)
+      if m then fire(m)
+      else ColourNote("orange","","Recall Manager: no button '"..fname.."'. Try 'recallmanager list' or 'recallmanager help'.") end
+      return
+   end
+
+   local rest = arg:match("^%S+%s*(.*)$")   -- everything after the verb
+
+   if lverb == "help" or lverb == "?" then help()
+   elseif lverb == "list"  then list()
+   elseif lverb == "show"  then WindowShow(win, true); repaint()
+   elseif lverb == "hide"  then WindowShow(win, false)
+   elseif lverb == "reset" then
       for _, m in ipairs(cfg.methods) do m.count = 0 end
       cfg.last = "-"; paint()
       ColourNote("cyan","","Recall Manager: counters reset.")
 
-   elseif verb == "factoryreset" then
+   elseif lverb == "factoryreset" then
       if rest:match("^%s*confirm%s*$") then
          for _, m in ipairs(cfg.methods) do drop_trigger(m.name) end   -- kill arrival triggers
          cfg = defaults()
@@ -298,60 +328,59 @@ function rm_cmd (name, line, wildcards)
          ColourNote("orange","","Confirm with:  recallmanager factoryreset confirm")
       end
 
-   elseif verb == "add" then
-      local n, cmds = rest:match("^(%S+)%s+(.+)$")
+   elseif lverb == "add" then
+      local n, cmds = parse_name(rest)
       if not valid_name(n) then
-         ColourNote("orange","","Bad name. Use letters/digits/_ , not a reserved word. Usage: recallmanager add <name> <cmd|cmd>")
-      elseif not cmds then
+         ColourNote("orange","","Bad name. Letters/digits/space/_/- , not a reserved word. Quote multi-word names: recallmanager add 'Clan Hall' <cmd|cmd>")
+      elseif not cmds or cmds == "" then
          ColourNote("orange","","Usage: recallmanager add <name> <cmd|cmd|...>")
       elseif find(n) then
-         ColourNote("orange","","'"..n.."' exists. Use recallmanager edit "..n.." ...")
+         ColourNote("orange","","'"..n.."' exists. Use: recallmanager edit "..n.." ...")
       else
          table.insert(cfg.methods, { name = n, cmds = cmds, count = 0 })
          rebuild()
          ColourNote("cyan","","Recall Manager: added "..n.." = "..cmds)
       end
 
-   elseif verb == "edit" then
-      local n, cmds = rest:match("^(%S+)%s+(.+)$")
-      local m = n and find(n)
-      if not m or not cmds then
+   elseif lverb == "edit" then
+      local n, cmds = parse_name(rest)
+      local m = find(n)
+      if not m or not cmds or cmds == "" then
          ColourNote("orange","","Usage: recallmanager edit <name> <cmd|cmd|...>")
       else
          m.cmds = cmds
-         ColourNote("cyan","","Recall Manager: "..n.." = "..cmds)
+         ColourNote("cyan","","Recall Manager: "..m.name.." = "..cmds)
       end
 
-   elseif verb == "del" or verb == "delete" then
-      local n = rest:match("^(%S+)")
-      local m, i
-      if n then m, i = find(n) end
+   elseif lverb == "del" or lverb == "delete" then
+      local n = parse_name(rest)
+      local m, i = find(n)
       if not m then
          ColourNote("orange","","Usage: recallmanager del <name>")
       else
-         drop_trigger(n)
+         drop_trigger(m.name)
          table.remove(cfg.methods, i)
          rebuild()
-         ColourNote("cyan","","Recall Manager: removed "..n)
+         ColourNote("cyan","","Recall Manager: removed "..m.name)
       end
 
-   elseif verb == "at" then
-      local n, pat = rest:match("^(%S+)%s+(.+)$")
-      local m = n and find(n)
-      if not m then
+   elseif lverb == "at" then
+      local n, pat = parse_name(rest)
+      local m = find(n)
+      if not m or not pat or pat == "" then
          ColourNote("orange","","Usage: recallmanager at <name> <regexp|off>")
       elseif pat == "off" then
-         m.at = nil; drop_trigger(n)
-         ColourNote("cyan","","Recall Manager: "..n.." arrival cleared")
+         m.at = nil; drop_trigger(m.name)
+         ColourNote("cyan","","Recall Manager: "..m.name.." arrival cleared")
       else
          m.at = pat; make_trigger(m)
-         ColourNote("cyan","","Recall Manager: "..n.." arrival = "..pat)
+         ColourNote("cyan","","Recall Manager: "..m.name.." arrival = "..pat)
       end
 
-   elseif verb == "var" then
+   elseif lverb == "var" then
       local n, v = rest:match("^(%S+)%s+(.+)$")
       if not n or not n:match("^[%w_]+$") then
-         ColourNote("orange","","Usage: recallmanager var <name> <value|off>   (reference as $name in commands)")
+         ColourNote("orange","","Usage: recallmanager var <name> <value|off>   (name is one word; reference as $name)")
       elseif v == "off" then
          cfg.vars[n] = nil
          ColourNote("cyan","","Recall Manager: cleared $"..n)
@@ -360,17 +389,12 @@ function rm_cmd (name, line, wildcards)
          ColourNote("cyan","","Recall Manager: $"..n.." = "..v)
       end
 
-   elseif verb == "vars" then
+   elseif lverb == "vars" then
       if not next(cfg.vars) then
          ColourNote("silver","","No vars. recallmanager var <name> <value>")
       else
          for k, v in pairs(cfg.vars) do ColourNote("silver","","  $"..k.." = "..v) end
       end
-
-   else
-      local m = find(verb)
-      if m then fire(m)
-      else ColourNote("orange","","Recall Manager: no button '"..verb.."'. Try 'recallmanager list' or 'recallmanager help'.") end
    end
 end
 
