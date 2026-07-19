@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.1"
+   version="2.2"
 >
 <description trim="y">
 <![CDATA[
@@ -23,14 +23,22 @@ Ships empty; nothing is assumed about your character.
   recallmanager edit <name> <cmd|cmd|...>   change a button's commands
   recallmanager del <name>                  remove a button
   recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
+  recallmanager var <name> <value|off>      define $name (an id, a clan, anything)
   recallmanager <name>                      fire a button (same as clicking it)
-  recallmanager list                        show your buttons
+  recallmanager list | vars                 show buttons / vars
   recallmanager reset                       zero the counters
   recallmanager                             show/hide the window
   recallmanager help                        this
 
-Example (a held-item transport + a plain recall):
-  recallmanager add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
+Vars: put $name in a command and it's replaced by the value you set. Define an
+id/keyword/clan once, reference it everywhere, change it in one place. Whatever
+$name means is up to you -- the plugin isn't opinionated about it.
+
+Example (a held-item transport whose ids live in vars, + a plain recall):
+  recallmanager var bag 67890
+  recallmanager var bus 12345
+  recallmanager var wep 55555
+  recallmanager add bus get $bus $bag|hold $bus|enter|dual $wep|put $bus $bag
   recallmanager at  bus ^WHOOOOOOOOOOOOSH!$
   recallmanager add recall recall
 ]]>
@@ -63,10 +71,11 @@ local function header () return TITLE .. " v" .. PVER end
 local RESERVED = {
    add=true, edit=true, del=true, delete=true, at=true, rename=true,
    list=true, reset=true, help=true, ["?"]=true, show=true, hide=true,
+   var=true, vars=true,
 }
 
 local function defaults ()
-   return { ver = 1, methods = {}, location = "?", last = "-",
+   return { ver = 1, methods = {}, vars = {}, location = "?", last = "-",
             font = "Lucida Console", size = 9 }
 end
 
@@ -193,11 +202,25 @@ end
 ----------------------------------------------------------------------
 -- fire a button
 ----------------------------------------------------------------------
+-- replace $name tokens with the current value from cfg.vars (define a value once
+-- -- an item id, a clan name, anything -- and every button using $name updates
+-- when you change it)
+local function subst (cmd)
+   return (cmd:gsub("%$([%w_]+)", function (k)
+      local v = cfg.vars[k]
+      if v == nil then
+         ColourNote("orange","","Recall Manager: undefined var '$"..k.."'. Set it: recallmanager var "..k.." <value>")
+         return "$"..k
+      end
+      return v
+   end))
+end
+
 local function fire (m)
    -- commands are '|'-separated, NOT ';': with command stacking on, a typed ';'
    -- would be split by the client before this plugin ever sees it
    for c in (m.cmds or ""):gmatch("[^|]+") do
-      Send((c:gsub("^%s+",""):gsub("%s+$","")))
+      Send((subst(c):gsub("^%s+",""):gsub("%s+$","")))
    end
    m.count = (m.count or 0) + 1
    cfg.last = m.name
@@ -221,8 +244,10 @@ local function help ()
    ColourNote("yellow","","recallmanager edit <name> <cmd|cmd|...>  change its commands")
    ColourNote("yellow","","recallmanager del <name>                 remove it")
    ColourNote("yellow","","recallmanager at <name> <regexp|off>     arrival line -> sets 'At:'")
+   ColourNote("yellow","","recallmanager var <name> <value|off>     define $name for use in commands")
    ColourNote("yellow","","recallmanager <name>                     fire it (same as clicking)")
-   ColourNote("yellow","","recallmanager list | reset | show | hide")
+   ColourNote("yellow","","recallmanager list | vars | reset | show | hide")
+   ColourNote("silver","","use $name in a command to insert a var (e.g. get $bus $bag)")
 end
 
 local function list ()
@@ -309,6 +334,25 @@ function rm_cmd (name, line, wildcards)
          ColourNote("cyan","","Recall Manager: "..n.." arrival = "..pat)
       end
 
+   elseif verb == "var" then
+      local n, v = rest:match("^(%S+)%s+(.+)$")
+      if not n or not n:match("^[%w_]+$") then
+         ColourNote("orange","","Usage: recallmanager var <name> <value|off>   (reference as $name in commands)")
+      elseif v == "off" then
+         cfg.vars[n] = nil
+         ColourNote("cyan","","Recall Manager: cleared $"..n)
+      else
+         cfg.vars[n] = v
+         ColourNote("cyan","","Recall Manager: $"..n.." = "..v)
+      end
+
+   elseif verb == "vars" then
+      if not next(cfg.vars) then
+         ColourNote("silver","","No vars. recallmanager var <name> <value>")
+      else
+         for k, v in pairs(cfg.vars) do ColourNote("silver","","  $"..k.." = "..v) end
+      end
+
    else
       local m = find(verb)
       if m then fire(m)
@@ -327,6 +371,7 @@ function OnPluginInstall ()
       if ok and saved then
          for k, v in pairs(saved) do cfg[k] = v end
          cfg.methods = cfg.methods or {}
+         cfg.vars    = cfg.vars    or {}
       end
    end
 
