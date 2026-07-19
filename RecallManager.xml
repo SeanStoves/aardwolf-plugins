@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.0"
+   version="2.1"
 >
 <description trim="y">
 <![CDATA[
@@ -19,20 +19,20 @@ button runs a list of commands separated by '|' (a pipe, NOT a semicolon --
 Aardwolf's command stacking would split a ';' before this plugin sees it).
 Ships empty; nothing is assumed about your character.
 
-  rm add <name> <cmd|cmd|...>    add a button
-  rm edit <name> <cmd|cmd|...>   change a button's commands
-  rm del <name>                  remove a button
-  rm at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
-  rm <name>                      fire a button (same as clicking it)
-  rm list                        show your buttons
-  rm reset                       zero the counters
-  rm                             show/hide the window
-  rm help                        this
+  recallmanager add <name> <cmd|cmd|...>    add a button
+  recallmanager edit <name> <cmd|cmd|...>   change a button's commands
+  recallmanager del <name>                  remove a button
+  recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
+  recallmanager <name>                      fire a button (same as clicking it)
+  recallmanager list                        show your buttons
+  recallmanager reset                       zero the counters
+  recallmanager                             show/hide the window
+  recallmanager help                        this
 
 Example (a held-item transport + a plain recall):
-  rm add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
-  rm at  bus ^WHOOOOOOOOOOOOSH!$
-  rm add recall recall
+  recallmanager add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
+  recallmanager at  bus ^WHOOOOOOOOOOOOSH!$
+  recallmanager add recall recall
 ]]>
 </description>
 </plugin>
@@ -40,7 +40,7 @@ Example (a held-item transport + a plain recall):
 <include name="constants.lua"/>
 
 <aliases>
-  <alias match="^rm(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y"
+  <alias match="^recallmanager(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y"
      script="rm_cmd" sequence="100"></alias>
 </aliases>
 
@@ -51,6 +51,13 @@ require "serialize"
 
 local win = GetPluginID()
 local cfg                              -- { ver, methods[], location, last, font, size }
+
+-- title shown on the miniwindow header: "<display name> v<version>". Version is
+-- pulled from the plugin metadata (GetPluginInfo code 19) so it never drifts
+-- from the <plugin version="..."> header. Convention for all our UI plugins.
+local TITLE = "Recall Manager"
+local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+local function header () return TITLE .. " v" .. PVER end
 
 -- verbs the dispatcher owns; can't be used as button names
 local RESERVED = {
@@ -122,11 +129,12 @@ end
 function paint ()                       -- global so rm_arrived (defined above) can call it
    WindowRectOp(win, 2, 0, 0, 0, 0, COL.bg)
    WindowRectOp(win, 2, 0, 0, L.width, L.title_h, COL.bar)
-   WindowText(win, "fb", "Recall Manager", PAD, PAD/2, 0, 0, COL.accent)
+   WindowText(win, "fb", TITLE, PAD, PAD/2, 0, 0, COL.accent)
+   WindowText(win, "f", " v"..PVER, PAD + WindowTextWidth(win, "fb", TITLE), PAD/2, 0, 0, COL.dim)
 
    if #cfg.methods == 0 then
       WindowText(win, "f", "No buttons yet.", PAD, L.title_h + PAD, 0, 0, COL.dim)
-      WindowText(win, "f", "rm add <name> <cmds>", PAD, L.title_h + PAD + L.fh + 2, 0, 0, COL.dim)
+      WindowText(win, "f", "recallmanager add <name> <cmds>", PAD, L.title_h + PAD + L.fh + 2, 0, 0, COL.dim)
    else
       for _, m in ipairs(cfg.methods) do
          local y  = L.rows[m.name]
@@ -150,8 +158,11 @@ function rebuild ()                     -- global for symmetry; call on config c
    L.fh      = WindowFontInfo(win, "f", 1) or 12
    L.title_h = L.fh + PAD
 
-   -- width fits the longest label (and the title)
-   local w = WindowTextWidth(win, "fb", "Recall Manager")
+   -- width fits the longest label (and the title + version)
+   local w = WindowTextWidth(win, "fb", TITLE) + WindowTextWidth(win, "f", " v"..PVER)
+   if #cfg.methods == 0 then
+      w = math.max(w, WindowTextWidth(win, "f", "recallmanager add <name> <cmds>"))
+   end
    for _, m in ipairs(cfg.methods) do
       w = math.max(w, WindowTextWidth(win, "f", m.name.."  (99)"))
    end
@@ -205,18 +216,18 @@ function rm_out  (flags, id) if hovered == id then hovered = nil; paint() end en
 -- command dispatcher
 ----------------------------------------------------------------------
 local function help ()
-   ColourNote("cyan","","Recall Manager -- build your own travel buttons")
-   ColourNote("yellow","","rm add <name> <cmd|cmd|...>   add a button (| separates cmds)")
-   ColourNote("yellow","","rm edit <name> <cmd|cmd|...>  change its commands")
-   ColourNote("yellow","","rm del <name>                 remove it")
-   ColourNote("yellow","","rm at <name> <regexp|off>     arrival line -> sets 'At:'")
-   ColourNote("yellow","","rm <name>                     fire it (same as clicking)")
-   ColourNote("yellow","","rm list | reset | show | hide")
+   ColourNote("cyan","",header().." -- build your own travel buttons")
+   ColourNote("yellow","","recallmanager add <name> <cmd|cmd|...>   add a button (| separates cmds)")
+   ColourNote("yellow","","recallmanager edit <name> <cmd|cmd|...>  change its commands")
+   ColourNote("yellow","","recallmanager del <name>                 remove it")
+   ColourNote("yellow","","recallmanager at <name> <regexp|off>     arrival line -> sets 'At:'")
+   ColourNote("yellow","","recallmanager <name>                     fire it (same as clicking)")
+   ColourNote("yellow","","recallmanager list | reset | show | hide")
 end
 
 local function list ()
    if #cfg.methods == 0 then
-      ColourNote("silver","","No buttons yet. rm add <name> <cmds>")
+      ColourNote("silver","","No buttons yet. recallmanager add <name> <cmds>")
       return
    end
    for _, m in ipairs(cfg.methods) do
@@ -251,11 +262,11 @@ function rm_cmd (name, line, wildcards)
    elseif verb == "add" then
       local n, cmds = rest:match("^(%S+)%s+(.+)$")
       if not valid_name(n) then
-         ColourNote("orange","","Bad name. Use letters/digits/_ , not a reserved word. Usage: rm add <name> <cmd|cmd>")
+         ColourNote("orange","","Bad name. Use letters/digits/_ , not a reserved word. Usage: recallmanager add <name> <cmd|cmd>")
       elseif not cmds then
-         ColourNote("orange","","Usage: rm add <name> <cmd|cmd|...>")
+         ColourNote("orange","","Usage: recallmanager add <name> <cmd|cmd|...>")
       elseif find(n) then
-         ColourNote("orange","","'"..n.."' exists. Use rm edit "..n.." ...")
+         ColourNote("orange","","'"..n.."' exists. Use recallmanager edit "..n.." ...")
       else
          table.insert(cfg.methods, { name = n, cmds = cmds, count = 0 })
          rebuild()
@@ -266,7 +277,7 @@ function rm_cmd (name, line, wildcards)
       local n, cmds = rest:match("^(%S+)%s+(.+)$")
       local m = n and find(n)
       if not m or not cmds then
-         ColourNote("orange","","Usage: rm edit <name> <cmd|cmd|...>")
+         ColourNote("orange","","Usage: recallmanager edit <name> <cmd|cmd|...>")
       else
          m.cmds = cmds
          ColourNote("cyan","","Recall Manager: "..n.." = "..cmds)
@@ -277,7 +288,7 @@ function rm_cmd (name, line, wildcards)
       local m, i
       if n then m, i = find(n) end
       if not m then
-         ColourNote("orange","","Usage: rm del <name>")
+         ColourNote("orange","","Usage: recallmanager del <name>")
       else
          drop_trigger(n)
          table.remove(cfg.methods, i)
@@ -289,7 +300,7 @@ function rm_cmd (name, line, wildcards)
       local n, pat = rest:match("^(%S+)%s+(.+)$")
       local m = n and find(n)
       if not m then
-         ColourNote("orange","","Usage: rm at <name> <regexp|off>")
+         ColourNote("orange","","Usage: recallmanager at <name> <regexp|off>")
       elseif pat == "off" then
          m.at = nil; drop_trigger(n)
          ColourNote("cyan","","Recall Manager: "..n.." arrival cleared")
@@ -301,7 +312,7 @@ function rm_cmd (name, line, wildcards)
    else
       local m = find(verb)
       if m then fire(m)
-      else ColourNote("orange","","Recall Manager: no button '"..verb.."'. Try 'rm list' or 'rm help'.") end
+      else ColourNote("orange","","Recall Manager: no button '"..verb.."'. Try 'recallmanager list' or 'recallmanager help'.") end
    end
 end
 

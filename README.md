@@ -26,18 +26,20 @@ commands. Good for recalls, portals, held-item transports, shop runs, anything
 you do the same way every time. Ships empty; nothing is assumed about your
 character. Optional per-button arrival detection updates an "At:" readout.
 
-Commands (type `rm help`):
+The miniwindow shows `Recall Manager v<version>` on its title bar.
+
+Commands (type `recallmanager help`):
 
 ```
-rm add <name> <cmd|cmd|...>    add a button
-rm edit <name> <cmd|cmd|...>   change a button's commands
-rm del <name>                  remove a button
-rm at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
-rm <name>                      fire a button (same as clicking it)
-rm list                        show your buttons
-rm reset                       zero the counters
-rm                             show/hide the window
-rm help                        this
+recallmanager add <name> <cmd|cmd|...>    add a button
+recallmanager edit <name> <cmd|cmd|...>   change a button's commands
+recallmanager del <name>                  remove a button
+recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
+recallmanager <name>                      fire a button (same as clicking it)
+recallmanager list                        show your buttons
+recallmanager reset                       zero the counters
+recallmanager                             show/hide the window
+recallmanager help                        this
 ```
 
 **Commands are separated by `|`, not `;`.** Aardwolf's command stacking splits a
@@ -47,11 +49,11 @@ Example — a magic-bus transport (held item, by object id), a plain recall, and
 portal with an arrival line:
 
 ```
-rm add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
-rm at  bus ^WHOOOOOOOOOOOOSH!$
-rm add recall recall
-rm add portal get 11111 67890|hold 11111|enter|put 11111 67890
-rm at  portal ^Inside the Academy Foyer
+recallmanager add bus get 12345 67890|hold 12345|enter|dual 55555|put 12345 67890
+recallmanager at  bus ^WHOOOOOOOOOOOOSH!$
+recallmanager add recall recall
+recallmanager add portal get 11111 67890|hold 11111|enter|put 11111 67890
+recallmanager at  portal ^Inside the Academy Foyer
 ```
 
 Get an item's object id in-game with the `id` spell/command. Drag the window by
