@@ -39,6 +39,7 @@ recallmanager var <name> <value|off>      define $name (an id, a clan, anything)
 recallmanager <name>                      fire a button (same as clicking it)
 recallmanager list | vars                 show buttons / vars
 recallmanager reset                       zero the counters
+recallmanager factoryreset confirm        wipe ALL buttons + vars (no undo)
 recallmanager                             show/hide the window
 recallmanager help                        this
 ```

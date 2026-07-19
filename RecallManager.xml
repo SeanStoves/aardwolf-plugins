@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.2"
+   version="2.3"
 >
 <description trim="y">
 <![CDATA[
@@ -27,6 +27,7 @@ Ships empty; nothing is assumed about your character.
   recallmanager <name>                      fire a button (same as clicking it)
   recallmanager list | vars                 show buttons / vars
   recallmanager reset                       zero the counters
+  recallmanager factoryreset confirm        wipe ALL buttons + vars (no undo)
   recallmanager                             show/hide the window
   recallmanager help                        this
 
@@ -71,7 +72,7 @@ local function header () return TITLE .. " v" .. PVER end
 local RESERVED = {
    add=true, edit=true, del=true, delete=true, at=true, rename=true,
    list=true, reset=true, help=true, ["?"]=true, show=true, hide=true,
-   var=true, vars=true,
+   var=true, vars=true, factoryreset=true,
 }
 
 local function defaults ()
@@ -247,6 +248,7 @@ local function help ()
    ColourNote("yellow","","recallmanager var <name> <value|off>     define $name for use in commands")
    ColourNote("yellow","","recallmanager <name>                     fire it (same as clicking)")
    ColourNote("yellow","","recallmanager list | vars | reset | show | hide")
+   ColourNote("yellow","","recallmanager factoryreset confirm       wipe ALL buttons + vars")
    ColourNote("silver","","use $name in a command to insert a var (e.g. get $bus $bag)")
 end
 
@@ -283,6 +285,18 @@ function rm_cmd (name, line, wildcards)
       for _, m in ipairs(cfg.methods) do m.count = 0 end
       cfg.last = "-"; paint()
       ColourNote("cyan","","Recall Manager: counters reset.")
+
+   elseif verb == "factoryreset" then
+      if rest:match("^%s*confirm%s*$") then
+         for _, m in ipairs(cfg.methods) do drop_trigger(m.name) end   -- kill arrival triggers
+         cfg = defaults()
+         rebuild()
+         SaveState()
+         ColourNote("cyan","","Recall Manager: factory reset -- all buttons and vars cleared.")
+      else
+         ColourNote("orange","","This wipes ALL buttons and vars and cannot be undone.")
+         ColourNote("orange","","Confirm with:  recallmanager factoryreset confirm")
+      end
 
    elseif verb == "add" then
       local n, cmds = rest:match("^(%S+)%s+(.+)$")
