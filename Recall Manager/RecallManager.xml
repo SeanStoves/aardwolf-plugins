@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 11:00:00"
    requires="5.07"
-   version="2.5"
+   version="2.6"
 >
 <description trim="y">
 <![CDATA[
@@ -72,7 +72,7 @@ local function header () return TITLE .. " v" .. PVER end
 local RESERVED = {
    add=true, edit=true, del=true, delete=true, at=true, rename=true,
    list=true, reset=true, help=true, ["?"]=true, show=true, hide=true,
-   var=true, vars=true, factoryreset=true,
+   var=true, vars=true, factoryreset=true, size=true, font=true,
 }
 
 local function defaults ()
@@ -93,10 +93,10 @@ local COL = {
 }
 
 local PAD   = 6
-local ROW_H = 20
 local MINW  = 150
 local hovered = nil
-local L = { width = MINW }             -- computed layout: width, title_h, fh, foot_y, rows[name]=y
+local L = { width = MINW }             -- computed layout: width, height, title_h, fh, row_h, foot_y, rows[name]=y
+local drag_x0, drag_y0, drag_size0     -- resize-grip drag state
 
 local function find (name)          -- case-insensitive; names may contain spaces
    if not name then return end
@@ -154,6 +154,39 @@ end
 -- (resize + hotspots). Splitting them keeps a hover repaint from tearing
 -- down the hotspot you're mid-click on.
 ----------------------------------------------------------------------
+local function apply_font ()           -- (re)load fonts at the current size
+   WindowFont(win, "f",  cfg.font, cfg.size, false, false, false, false, 0)
+   WindowFont(win, "fb", cfg.font, cfg.size, true,  false, false, false, 0)
+end
+
+-- everything (row height, width, height) derives from the font, so the whole UI
+-- scales when cfg.size changes -- that's what makes it responsive to a resize
+local function layout_metrics ()
+   L.fh      = WindowFontInfo(win, "f", 1) or 12
+   L.row_h   = L.fh + 8
+   L.title_h = L.fh + PAD
+
+   local w = WindowTextWidth(win, "fb", TITLE) + WindowTextWidth(win, "f", " v"..PVER)
+   if #cfg.methods == 0 then
+      w = math.max(w, WindowTextWidth(win, "f", "recallmanager add <name> <cmds>"))
+   end
+   for _, m in ipairs(cfg.methods) do
+      w = math.max(w, WindowTextWidth(win, "f", m.name.."     (99)"))   -- name + gap + count
+   end
+   L.width = math.max(MINW, w + PAD*2 + 12)
+
+   L.rows = {}
+   local y = L.title_h + PAD/2
+   if #cfg.methods == 0 then
+      y = L.title_h + PAD + (L.fh + 2) + L.fh + PAD/2
+   else
+      for _, m in ipairs(cfg.methods) do L.rows[m.name] = y; y = y + L.row_h end
+      y = y + PAD/2
+   end
+   L.foot_y = y
+   L.height = L.foot_y + (L.fh * 2) + PAD
+end
+
 function paint ()                       -- global so rm_arrived (defined above) can call it
    WindowRectOp(win, 2, 0, 0, 0, 0, COL.bg)
    WindowRectOp(win, 2, 0, 0, L.width, L.title_h, COL.bar)
@@ -165,11 +198,15 @@ function paint ()                       -- global so rm_arrived (defined above) 
       WindowText(win, "f", "recallmanager add <name> <cmds>", PAD, L.title_h + PAD + L.fh + 2, 0, 0, COL.dim)
    else
       for _, m in ipairs(cfg.methods) do
-         local y  = L.rows[m.name]
-         local bg = (hovered == "rm_"..m.name) and COL.hover or COL.btn
-         WindowRectOp(win, 2, PAD, y, L.width-PAD, y+ROW_H-3, bg)
-         WindowRectOp(win, 1, PAD, y, L.width-PAD, y+ROW_H-3, COL.border)
-         WindowText(win, "f", m.name.."  ("..(m.count or 0)..")", PAD+5, y+3, 0, 0, COL.text)
+         local y   = L.rows[m.name]
+         local bot = y + L.row_h - 3
+         local bg  = (hovered == "rm_"..m.name) and COL.hover or COL.btn
+         WindowRectOp(win, 2, PAD, y, L.width-PAD, bot, bg)
+         WindowRectOp(win, 1, PAD, y, L.width-PAD, bot, COL.border)
+         local ty  = y + math.floor((L.row_h - L.fh) / 2) - 1     -- vertically centered
+         WindowText(win, "f", m.name, PAD+5, ty, 0, 0, COL.text)  -- name left-aligned
+         local cnt = "("..(m.count or 0)..")"
+         WindowText(win, "f", cnt, L.width-PAD-6-WindowTextWidth(win,"f",cnt), ty, 0, 0, COL.dim)  -- count right-aligned
       end
    end
 
@@ -178,42 +215,30 @@ function paint ()                       -- global so rm_arrived (defined above) 
    WindowText(win, "fb", cfg.location, PAD + WindowTextWidth(win,"f","At: "), ly, 0, 0, COL.ok)
    WindowText(win, "f",  "Last: "..cfg.last, PAD, ly+L.fh+1, 0, 0, COL.dim)
 
+   -- resize grip: diagonal ticks in the bottom-right corner
+   for i = 1, 3 do
+      local o = i * 3
+      WindowLine(win, L.width-o-2, L.height-2, L.width-2, L.height-o-2, COL.dim, 0, 1)
+   end
+
    WindowRectOp(win, 1, 0, 0, L.width-1, L.height-1, COL.border)
    repaint()
 end
 
-function rebuild ()                     -- global for symmetry; call on config changes
-   L.fh      = WindowFontInfo(win, "f", 1) or 12
-   L.title_h = L.fh + PAD
-
-   -- width fits the longest label (and the title + version)
-   local w = WindowTextWidth(win, "fb", TITLE) + WindowTextWidth(win, "f", " v"..PVER)
-   if #cfg.methods == 0 then
-      w = math.max(w, WindowTextWidth(win, "f", "recallmanager add <name> <cmds>"))
-   end
-   for _, m in ipairs(cfg.methods) do
-      w = math.max(w, WindowTextWidth(win, "f", m.name.."  (99)"))
-   end
-   L.width = math.max(MINW, w + PAD*2 + 10)
-
-   L.rows = {}
-   local y = L.title_h + PAD/2
-   if #cfg.methods == 0 then
-      y = L.title_h + PAD + (L.fh + 2) + L.fh + PAD/2   -- room for the 2 hint lines
-   else
-      for _, m in ipairs(cfg.methods) do L.rows[m.name] = y; y = y + ROW_H end
-      y = y + PAD/2
-   end
-   L.foot_y = y
-   L.height = L.foot_y + (L.fh * 2) + PAD
-
+function rebuild ()                     -- config/size changes: relayout + (re)build hotspots
+   layout_metrics()
    WindowResize(win, L.width, L.height, COL.bg)
    WindowDeleteAllHotspots(win)          -- safe here: rebuild never runs mid-click
    for _, m in ipairs(cfg.methods) do
       local ry = L.rows[m.name]
-      WindowAddHotspot(win, "rm_"..m.name, PAD, ry, L.width-PAD, ry+ROW_H-3,
+      WindowAddHotspot(win, "rm_"..m.name, PAD, ry, L.width-PAD, ry+L.row_h-3,
          "rm_over", "rm_out", "", "", "rm_click", m.name, miniwin.cursor_hand, 0)
    end
+   -- resize grip hotspot (bottom-right corner), with a continuous drag handler
+   local g = math.max(12, L.fh)
+   WindowAddHotspot(win, "rm_resize", L.width-g, L.height-g, L.width, L.height,
+      "", "", "rm_resize_down", "", "", "drag to resize", miniwin.cursor_hand, 0)
+   WindowDragHandler(win, "rm_resize", "rm_resize_move", "rm_resize_done", 0)
    movewindow.add_drag_handler(win, 0, 0, L.width, L.title_h)   -- re-add after DeleteAll
    paint()
 end
@@ -254,6 +279,30 @@ end
 function rm_over (flags, id) if hovered ~= id then hovered = id; paint() end end
 function rm_out  (flags, id) if hovered == id then hovered = nil; paint() end end
 
+-- resize grip: drag toward the bottom-right to grow the font (whole UI scales),
+-- back toward the top-left to shrink. Layout is font-driven so it stays responsive.
+function rm_resize_down (flags, id)
+   -- 17/18 = current mouse screen position; baseline for the movement delta
+   drag_x0, drag_y0, drag_size0 = WindowInfo(win, 17), WindowInfo(win, 18), cfg.size
+end
+function rm_resize_move (flags, id)
+   local dx = WindowInfo(win, 17) - (drag_x0 or 0)
+   local dy = WindowInfo(win, 18) - (drag_y0 or 0)
+   local ns = math.max(6, math.min(28, (drag_size0 or cfg.size) + math.floor(((dx+dy)/2)/7 + 0.5)))
+   if ns ~= cfg.size then
+      cfg.size = ns
+      apply_font()
+      layout_metrics()
+      WindowResize(win, L.width, L.height, COL.bg)   -- resize + repaint, but DON'T rebuild
+      paint()                                        -- (would delete the live grip hotspot)
+   end
+   SetCursor(miniwin.cursor_hand)
+end
+function rm_resize_done (flags, id)
+   rebuild()      -- now safe: re-add button hotspots at their new positions + re-arm grip
+   SaveState()
+end
+
 ----------------------------------------------------------------------
 -- command dispatcher
 ----------------------------------------------------------------------
@@ -265,10 +314,12 @@ local function help ()
    ColourNote("yellow","","recallmanager at <name> <regexp|off>     arrival line -> sets 'At:'")
    ColourNote("yellow","","recallmanager var <name> <value|off>     define $name for use in commands")
    ColourNote("yellow","","recallmanager <name>                     fire it (same as clicking)")
+   ColourNote("yellow","","recallmanager size <6-28> | font <name>   resize / restyle")
    ColourNote("yellow","","recallmanager list | vars | reset | show | hide")
    ColourNote("yellow","","recallmanager factoryreset confirm       wipe ALL buttons + vars")
    ColourNote("silver","","use $name in a command to insert a var (e.g. get $bus $bag)")
    ColourNote("silver","","quote multi-word button names: recallmanager add 'Clan Hall' recall")
+   ColourNote("silver","","drag the bottom-right grip to resize the window")
 end
 
 local function list ()
@@ -395,6 +446,26 @@ function rm_cmd (name, line, wildcards)
       else
          for k, v in pairs(cfg.vars) do ColourNote("silver","","  $"..k.." = "..v) end
       end
+
+   elseif lverb == "size" then
+      local n = tonumber(rest:match("%d+"))
+      if not n then
+         ColourNote("orange","","Usage: recallmanager size <6-28>   (or drag the bottom-right grip)")
+      else
+         cfg.size = math.max(6, math.min(28, n))
+         apply_font(); rebuild(); SaveState()
+         ColourNote("cyan","","Recall Manager: font size "..cfg.size)
+      end
+
+   elseif lverb == "font" then
+      local f = rest:gsub("^%s+",""):gsub("%s+$","")
+      if f == "" then
+         ColourNote("orange","","Usage: recallmanager font <font name>   (current: "..cfg.font..")")
+      else
+         cfg.font = f
+         apply_font(); rebuild(); SaveState()
+         ColourNote("cyan","","Recall Manager: font "..cfg.font)
+      end
    end
 end
 
@@ -418,8 +489,7 @@ function OnPluginInstall ()
       { mouseup = rm_titlebar }, { x = 10, y = 120 })
    WindowCreate(win, windowinfo.window_left, windowinfo.window_top, MINW, 30,
       windowinfo.window_mode, windowinfo.window_flags, COL.bg)
-   WindowFont(win, "f",  cfg.font, cfg.size, false, false, false, false, 0)
-   WindowFont(win, "fb", cfg.font, cfg.size, true,  false, false, false, 0)
+   apply_font()
 
    for _, m in ipairs(cfg.methods) do make_trigger(m) end
    rebuild()

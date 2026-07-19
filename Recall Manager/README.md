@@ -30,12 +30,18 @@ recallmanager del <name>                  remove a button
 recallmanager at <name> <regexp|off>      when that line is seen, set 'At:' to <name>
 recallmanager var <name> <value|off>      define $name (an id, a clan, anything)
 recallmanager <name>                      fire a button (same as clicking it)
+recallmanager size <6-28>                 font size (whole UI scales)
+recallmanager font <name>                 font family
 recallmanager list | vars                 show buttons / vars
 recallmanager reset                       zero the counters
 recallmanager factoryreset confirm        wipe ALL buttons + vars (no undo)
 recallmanager                             show/hide the window
 recallmanager help                        this
 ```
+
+**Resize** by dragging the grip in the bottom-right corner — the whole window
+scales responsively (rows, text, and width all follow the font size). Or set it
+directly with `recallmanager size <n>`. Size and font persist.
 
 ## Vars — dynamic values in commands
 
