@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="1.2"
+   version="1.3"
 >
 <description trim="y">
 <![CDATA[
@@ -188,7 +188,7 @@ local function build_mermaid (zone)
 
    local out = { "```mermaid", "flowchart TD" }
    for id, n in pairs(nodes) do
-      local lbl = esc(n.label)
+      local lbl = esc(n.label).."<br/>#"..id            -- room name + room id
       if n.note and n.note ~= "" then lbl = lbl.."<br/>*"..esc(n.note).."*" end
       out[#out+1] = "  r"..id..'["'..lbl..'"]'
    end
