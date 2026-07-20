@@ -6,27 +6,30 @@
    author="Solao"
    id="2d5a0a66f3a78e5a6f79554e"
    language="Lua"
-   purpose="Records rooms/exits as you walk; tracks coverage; exports mermaid + JSON maps"
+   purpose="Records rooms/exits/warps as you walk; notes; exports followable mermaid + JSON maps"
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="1.0"
+   version="1.1"
 >
 <description trim="y">
 <![CDATA[
-Explorer -- builds a map of each area from GMCP as YOU walk it. Records every
-room's name and exits, shows how much of the current area you've covered and
-which exits still lead somewhere new, and exports a mermaid flowchart (a
+Explorer -- builds a map of each area from GMCP as YOU walk it. It records the
+ACTUAL command you type to move, so warps and special exits ('enter portal',
+'pull lever', a maze word) show up as real edges labeled with the command --
+making even mazes followable. Add notes to rooms. Exports a mermaid flowchart (a
 gaardian-style map doc) + raw JSON per area.
 
-It only records what you walk into -- it never moves you. Needs the GMCP handler.
+It only records where you go; it never moves you. Needs the GMCP handler.
 
   explore                 show/hide the window
   explore mermaid         write the current area's mermaid map to a file
   explore json            write the current area's data to a JSON file
-  explore new             list rooms in this area that still have unexplored exits
-  explore list            list every area you've recorded
-  explore clear           forget the current area (asks to confirm)
+  explore note <text>     add a note to the room you're in (shows on the map)
+  explore note            show this room's note
+  explore new             rooms here with unexplored exits
+  explore list            areas recorded
+  explore clear           forget the current area ('explore clear yes' to confirm)
   explore help            this
 ]]>
 </description>
@@ -49,17 +52,25 @@ local win  = GetPluginID()
 local TITLE = "Explorer"
 local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
 
-local cfg                       -- { areas = { [zone] = { name, rooms = { [id] = {name, exits={dir=dest}} } } }, font, size }
-local last_msg = "-"
+-- room = { name, exits={dir=dest}, moves={command=dest}, note }
+local cfg
+local last_msg     = "-"
+local current_room = nil     -- id of the room we're tracked in
+local pending_cmd  = nil     -- last command you typed
+local pending_from = nil     -- room you were in when you typed it
 
 local function defaults () return { areas = {}, font = "Lucida Console", size = 9 } end
+
+local CARDINAL = { n=1,s=1,e=1,w=1,u=1,d=1,ne=1,nw=1,se=1,sw=1,
+   north=1,south=1,east=1,west=1,up=1,down=1,northeast=1,northwest=1,southeast=1,southwest=1 }
+local function is_dir (c) return CARDINAL[(c or ""):lower()] ~= nil end
 
 local COL = {
    bg=ColourNameToRGB("#0d1117"), bar=ColourNameToRGB("#161b2e"), btn=ColourNameToRGB("#1b2540"),
    hover=ColourNameToRGB("#274060"), text=ColourNameToRGB("#e6e6e6"), dim=ColourNameToRGB("#8a93a8"),
    accent=ColourNameToRGB("#e94560"), ok=ColourNameToRGB("#3ad07a"), border=ColourNameToRGB("#3a4a6b"),
 }
-local PAD, ROW_H, MINW = 6, 20, 210
+local PAD, ROW_H, MINW = 6, 20, 220
 local hovered = nil
 local L = { width = MINW }
 
@@ -74,11 +85,24 @@ local function gmcp (what)
    if not pcall(function() assert(loadstring("ret = "..val))() end) then return nil end
    return ret
 end
-
 local function cur_zone () return gmcp("room.info.zone") end
 
+local function area_of (id)          -- find the area table holding room id
+   for _, a in pairs(cfg.areas) do if a.rooms[id] then return a end end
+end
+
 ----------------------------------------------------------------------
--- record the room we're standing in (only what we walk into)
+-- capture the command you type (never alter it), so moves are labeled with
+-- the real command -- this is what makes warps/mazes followable
+----------------------------------------------------------------------
+function OnPluginCommandEntered (sText)
+   local c = Trim(sText)
+   if c ~= "" then pending_cmd = c; pending_from = current_room end
+   return sText                       -- pass through unchanged
+end
+
+----------------------------------------------------------------------
+-- record the room we're standing in + the transition that got us here
 ----------------------------------------------------------------------
 local function record ()
    local r = gmcp("room.info")
@@ -87,22 +111,35 @@ local function record ()
    local a = cfg.areas[zone]
    if not a then a = { name = zone, rooms = {} }; cfg.areas[zone] = a end
    local id = tostring(r.num)
+
+   -- observed transition: from_room --(what you typed)--> here
+   if pending_from and pending_cmd and pending_from ~= id then
+      local fa = area_of(pending_from)
+      if fa and fa.rooms[pending_from] then
+         local froom = fa.rooms[pending_from]
+         froom.moves = froom.moves or {}
+         froom.moves[pending_cmd] = id
+      end
+   end
+   pending_cmd, pending_from = nil, nil
+
    local room = a.rooms[id] or {}
    room.name  = r.name or room.name
    room.exits = {}
    for dir, dest in pairs(r.exits or {}) do room.exits[dir] = tostring(dest) end
    a.rooms[id] = room
+   current_room = id
 end
 
--- coverage of a zone: rooms recorded, and exits that point to a room we haven't recorded
+-- rooms recorded, and exits/moves pointing at a room we haven't recorded
 local function coverage (zone)
    local a = cfg.areas[zone]
    if not a then return 0, 0 end
    local rooms, unexplored = 0, {}
-   for id, room in pairs(a.rooms) do
+   for _, room in pairs(a.rooms) do
       rooms = rooms + 1
       for _, dest in pairs(room.exits or {}) do
-         if not a.rooms[dest] and not unexplored[dest] then unexplored[dest] = true end
+         if not a.rooms[dest] then unexplored[dest] = true end
       end
    end
    local n = 0; for _ in pairs(unexplored) do n = n + 1 end
@@ -113,26 +150,40 @@ end
 -- exports
 ----------------------------------------------------------------------
 local function safe (s) return (s or "area"):gsub("[^%w]+", "_") end
+local function esc  (s) return (s or ""):gsub('"', "'"):gsub("\n", " ") end
 local function plugin_dir () return GetPluginInfo(GetPluginID(), 20) end
 
 local function build_mermaid (zone)
    local a = cfg.areas[zone]
    if not a then return nil end
-   local nodes = {}
-   for id, room in pairs(a.rooms) do nodes[id] = room.name or "?" end
-   for _, room in pairs(a.rooms) do
-      for _, dest in pairs(room.exits or {}) do
-         if not nodes[dest] then nodes[dest] = "?" end   -- unexplored neighbor
-      end
-   end
-   local out = { "```mermaid", "flowchart TD" }
-   for id, label in pairs(nodes) do
-      out[#out+1] = "  r"..id..'["'..label:gsub('"', "'")..'"]'
+
+   local nodes = {}   -- id -> {label, note}
+   for id, room in pairs(a.rooms) do nodes[id] = { label = room.name or "?", note = room.note } end
+
+   local seen, edges = {}, {}   -- dedup edges by from|to|label
+   local function add_edge (from, to, label, dotted)
+      local k = from.."|"..to.."|"..label
+      if seen[k] then return end
+      seen[k] = true
+      edges[#edges+1] = { from = from, to = to, label = label, dotted = dotted }
+      if not nodes[to] then nodes[to] = { label = "?" } end
    end
    for id, room in pairs(a.rooms) do
+      for cmd, dest in pairs(room.moves or {}) do add_edge(id, dest, cmd, not is_dir(cmd)) end      -- observed
       for dir, dest in pairs(room.exits or {}) do
-         out[#out+1] = "  r"..id.." -->|"..dir.."| r"..dest
+         if not (room.moves and room.moves[dir]) then add_edge(id, dest, dir, false) end            -- known but unwalked
       end
+   end
+
+   local out = { "```mermaid", "flowchart TD" }
+   for id, n in pairs(nodes) do
+      local lbl = esc(n.label)
+      if n.note and n.note ~= "" then lbl = lbl.."<br/>*"..esc(n.note).."*" end
+      out[#out+1] = "  r"..id..'["'..lbl..'"]'
+   end
+   for _, e in ipairs(edges) do
+      local arrow = e.dotted and " -.->|" or " -->|"      -- dotted = warp / special command
+      out[#out+1] = "  r"..e.from..arrow..(e.label:gsub("|","/")).."| r"..e.to
    end
    out[#out+1] = "```"
    return table.concat(out, "\n")
@@ -146,23 +197,24 @@ local function write_file (path, text)
 end
 
 local function export_mermaid (zone)
-   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; return end
-   local path = plugin_dir().."map_"..safe(zone)..".md"
+   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; ColourNote("orange","","Explorer: "..last_msg); return end
    local rooms = coverage(zone)
-   local body = "# "..zone.."\n\n"..rooms.." rooms recorded.\n\n"..build_mermaid(zone).."\n"
+   local body = "# "..zone.."\n\n"..rooms.." rooms recorded. Solid = direction; dotted = warp / typed command.\n\n"
+              ..build_mermaid(zone).."\n"
+   local path = plugin_dir().."map_"..safe(zone)..".md"
    last_msg = write_file(path, body) and ("mermaid -> map_"..safe(zone)..".md") or "write failed"
    ColourNote("cyan","","Explorer: "..last_msg)
 end
 
 local function export_json (zone)
-   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; return end
+   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; ColourNote("orange","","Explorer: "..last_msg); return end
    local path = plugin_dir().."map_"..safe(zone)..".json"
    last_msg = write_file(path, json.encode(cfg.areas[zone])) and ("json -> map_"..safe(zone)..".json") or "write failed"
    ColourNote("cyan","","Explorer: "..last_msg)
 end
 
 ----------------------------------------------------------------------
--- GMCP broadcast: record on room change
+-- GMCP broadcast
 ----------------------------------------------------------------------
 function OnPluginBroadcast (msg, id, name, text)
    if id == GMCP and text == "room.info" then record(); paint() end
@@ -229,20 +281,15 @@ local function show_unexplored (zone)
    ColourNote("cyan","","Explorer: rooms with unexplored exits in "..zone..":")
    for id, room in pairs(a.rooms) do
       local outs = {}
-      for dir, dest in pairs(room.exits or {}) do
-         if not a.rooms[dest] then outs[#outs+1] = dir end
-      end
-      if #outs > 0 then
-         ColourNote("silver","","  "..(room.name or id).." ("..id.."): "..table.concat(outs, " "))
-      end
+      for dir, dest in pairs(room.exits or {}) do if not a.rooms[dest] then outs[#outs+1] = dir end end
+      if #outs > 0 then ColourNote("silver","","  "..(room.name or id).." ("..id.."): "..table.concat(outs, " ")) end
    end
 end
 
 local function list_areas ()
    local any = false
    for zone in pairs(cfg.areas) do
-      local r = coverage(zone)
-      ColourNote("silver","","  "..zone.." -- "..r.." rooms"); any = true
+      local r = coverage(zone); ColourNote("silver","","  "..zone.." -- "..r.." rooms"); any = true
    end
    if not any then ColourNote("orange","","Explorer: nothing recorded yet -- go walk somewhere") end
 end
@@ -286,26 +333,36 @@ local function help ()
    ColourNote("cyan","","Explorer v"..PVER.." -- maps areas as you walk them")
    ColourNote("yellow","","explore                 show/hide the window")
    ColourNote("yellow","","explore mermaid | json  export the current area")
+   ColourNote("yellow","","explore note <text>     note the current room (shows on the map)")
    ColourNote("yellow","","explore new             rooms here with unexplored exits")
    ColourNote("yellow","","explore list            areas recorded")
    ColourNote("yellow","","explore clear           forget the current area")
 end
 
 function ex_cmd (name, line, wildcards)
-   local arg = (wildcards[1] or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+   local arg  = Trim(wildcards[1] or "")
+   local verb, rest = arg:match("^(%S*)%s*(.*)$")
+   verb = verb:lower()
    local zone = cur_zone()
+
    if arg == "" then
       if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); paint() end
-   elseif arg == "help" or arg == "?" then help()
-   elseif arg == "mermaid" then export_mermaid(zone)
-   elseif arg == "json"    then export_json(zone)
-   elseif arg == "new"     then show_unexplored(zone)
-   elseif arg == "list"    then list_areas()
-   elseif arg == "clear"   then
-      if zone and cfg.areas[zone] then ColourNote("orange","","Explorer: type 'explore clear yes' to forget "..zone) end
-   elseif arg == "clear yes" then
-      if zone then cfg.areas[zone] = nil; last_msg = "cleared "..zone; paint(); ColourNote("cyan","","Explorer: cleared "..zone) end
-   else ColourNote("orange","","Explorer: unknown '"..arg.."'. Try 'explore help'.") end
+   elseif verb == "help" or verb == "?" then help()
+   elseif verb == "mermaid" then export_mermaid(zone)
+   elseif verb == "json"    then export_json(zone)
+   elseif verb == "new"     then show_unexplored(zone)
+   elseif verb == "list"    then list_areas()
+   elseif verb == "note" then
+      local a = zone and cfg.areas[zone]
+      local room = a and current_room and a.rooms[current_room]
+      if not room then ColourNote("orange","","Explorer: no recorded room here yet")
+      elseif rest == "" then ColourNote("cyan","","Explorer: note = "..(room.note or "(none)"))
+      else room.note = rest; last_msg = "noted"; paint(); ColourNote("cyan","","Explorer: noted -- "..rest) end
+   elseif verb == "clear" then
+      if rest:lower() == "yes" then
+         if zone then cfg.areas[zone] = nil; last_msg = "cleared "..zone; paint(); ColourNote("cyan","","Explorer: cleared "..zone) end
+      elseif zone and cfg.areas[zone] then ColourNote("orange","","Explorer: type 'explore clear yes' to forget "..zone) end
+   else ColourNote("orange","","Explorer: unknown '"..verb.."'. Try 'explore help'.") end
 end
 
 ----------------------------------------------------------------------
@@ -325,7 +382,7 @@ function OnPluginInstall ()
    WindowFont(win, "f",  cfg.font, cfg.size, false, false, false, false, 0)
    WindowFont(win, "fb", cfg.font, cfg.size, true,  false, false, false, 0)
    rebuild()
-   record()          -- capture the room we log in to
+   record()
    WindowShow(win, true)
 end
 

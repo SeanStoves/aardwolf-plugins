@@ -1,11 +1,15 @@
 # Explorer
 
 Builds a map of each Aardwolf area **from GMCP as you walk it** — records every
-room's name and exits, tracks how much of the current area you've covered, shows
-which exits still lead somewhere new, and exports a **mermaid** flowchart (a
+room's name and exits, tracks coverage, and exports a **mermaid** flowchart (a
 gaardian-style map doc) plus raw **JSON** per area.
 
-It only records the rooms you walk into — it never moves your character.
+It records the **actual command you type** to move, so warps and special exits
+(`enter portal`, `pull lever`, a maze word) become real edges labeled with the
+command — which makes even mazes followable: each edge tells you exactly what to
+type to make that move. You can also annotate rooms with notes.
+
+It only records where you go — it never moves your character.
 
 ## Requires
 
@@ -34,6 +38,8 @@ to hide, type `explore` to summon it.
 ```
 explore                 show/hide the window
 explore mermaid | json  export the current area
+explore note <text>     note the room you're in (shows on the map)
+explore note            show this room's note
 explore new             rooms here with unexplored exits
 explore list            areas recorded
 explore clear           forget the current area (then 'explore clear yes')
@@ -42,10 +48,18 @@ explore help            this
 
 ## Mermaid output
 
-Each room is a node (`r<roomid>["Room Name"]`); each exit is a labeled edge
-(`r100 -->|n| r101`). Exits to rooms you haven't entered show as `?` nodes, so the
-gaps in your coverage are visible on the map. Paste the file's contents anywhere
-mermaid renders (GitHub, many editors) to see the zone.
+Each room is a node (`r<roomid>["Room Name"]`); each move is a labeled edge:
+
+- **Solid** `r100 -->|n| r101` — a normal direction.
+- **Dotted** `r100 -.->|enter portal| r250` — a warp or special command (anything
+  that isn't a plain direction). The label is the exact command you typed to make
+  the move, so you can follow it.
+- Rooms you haven't entered show as `?` nodes, so coverage gaps are visible.
+- Room notes render under the name in the node.
+
+Because nodes are keyed by room **id**, identical-looking maze rooms are distinct
+and the graph is the true connectivity — follow the edges, not the geography.
+Paste the file's contents anywhere mermaid renders (GitHub, many editors).
 
 ## Workflow
 
