@@ -20,8 +20,14 @@ It reads the DB read-only — it never moves you or changes the map.
 |--------|------|
 | **Mermaid map (this area)** | Write the current area's map to `map_<Area>.md`. |
 | **JSON (this area)** | Write the current area's rooms + exits to `map_<Area>.json`. |
+| **Area info (level/runto/maps)** | Print this area's level range, `runto`, and clickable links to the gaardian / image / PDF maps. |
 | **Export ALL areas** | A mermaid file per area the mapper knows (many files). |
 | **List areas in DB** | Every area + room count. |
+
+The area info comes from `areadata.lua` (bundled with the plugin, generated from
+[aardwolfboot.com/maps](https://aardwolfboot.com/maps/)); the footer also shows the
+current area's level range. A pre-generated library of these maps for every area
+lives at [SeanStoves/aardwolf-maps](https://github.com/SeanStoves/aardwolf-maps).
 
 Footer shows the current **Area** and the last action. Files land in the plugin
 folder. Drag by the title bar, right-click to hide, type `explore` to summon it.

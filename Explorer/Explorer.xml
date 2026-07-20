@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="2.0"
+   version="2.1"
 >
 <description trim="y">
 <![CDATA[
@@ -55,6 +55,7 @@ local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
 
 local cfg
 local last_msg = "-"
+local AREADATA = {}    -- bundled area metadata (level/runto/map links) from aardwolfboot
 
 local function defaults () return { font = "Lucida Console", size = 9 } end
 
@@ -87,6 +88,21 @@ local function gmcp (what)
    local ret
    if not pcall(function() assert(loadstring("ret = "..val))() end) then return nil end
    return ret
+end
+
+local function areainfo ()
+   local z = gmcp("room.info.zone")
+   return z and AREADATA[z:lower()]
+end
+
+local function show_info ()
+   local d = areainfo()
+   if not d then ColourNote("orange","","Explorer: no catalog info for this area"); return end
+   ColourNote("cyan","","Explorer: "..d.name.."   lvl "..d.lvl.."   runto "..d.runto)
+   for _, lk in ipairs(d.links or {}) do
+      Hyperlink(lk[2], "  "..lk[1].."  ("..lk[2]..")", "open in browser", "aqua", "", true)
+      Note("")
+   end
 end
 
 local function db_path ()
@@ -245,6 +261,7 @@ end
 local BUTTONS = {
    { key="mermaid", label="Mermaid map (this area)" },
    { key="json",    label="JSON (this area)" },
+   { key="info",    label="Area info (level/runto/maps)" },
    { key="all",     label="Export ALL areas" },
    { key="list",    label="List areas in DB" },
 }
@@ -280,8 +297,11 @@ function paint ()
    end
 
    local y = L.foot_y
+   local zone = gmcp("room.info.zone")
+   local d = zone and AREADATA[zone:lower()]
    WindowText(win, "f", "Area: ", PAD, y, 0, 0, COL.dim)
-   WindowText(win, "fb", gmcp("room.info.zone") or "-", PAD + fw("Area: "), y, 0, 0, COL.ok)
+   WindowText(win, "fb", zone or "-", PAD + fw("Area: "), y, 0, 0, COL.ok)
+   if d then WindowText(win, "f", "  lvl "..d.lvl, PAD + fw("Area: ")+WindowTextWidth(win,"fb",zone or "-"), y, 0, 0, COL.dim) end
    WindowText(win, "f", last_msg, PAD, y + L.fh + 1, 0, 0, COL.dim)
 
    WindowRectOp(win, 1, 0, 0, L.width-1, L.height-1, COL.border)
@@ -292,6 +312,7 @@ end
 local function click_button (key)
    if     key == "mermaid" then export("mermaid")
    elseif key == "json"    then export("json")
+   elseif key == "info"    then show_info()
    elseif key == "all"     then export_all()
    elseif key == "list"    then list_areas() end
    paint()
@@ -329,6 +350,7 @@ end
 local function help ()
    ColourNote("cyan","","Explorer v"..PVER.." -- map docs from the mapper database")
    ColourNote("yellow","","explore mermaid | json  the area you're in")
+   ColourNote("yellow","","explore info            level, runto, and map links for this area")
    ColourNote("yellow","","explore area <name>     a named area (partial ok)")
    ColourNote("yellow","","explore all             every area (many files)")
    ColourNote("yellow","","explore list [filter]   areas in the DB")
@@ -344,6 +366,7 @@ function ex_cmd (name, line, wildcards)
    elseif verb == "help" or verb == "?" then help()
    elseif verb == "mermaid" then export("mermaid")
    elseif verb == "json"    then export("json")
+   elseif verb == "info"    then show_info()
    elseif verb == "all"     then export_all()
    elseif verb == "list"    then list_areas(rest ~= "" and rest or nil)
    elseif verb == "area" then
@@ -368,6 +391,8 @@ function OnPluginInstall ()
       local ok = pcall(function() assert(loadstring(blob))() end)
       if ok and saved then for k, v in pairs(saved) do cfg[k] = v end end
    end
+   local dok, adata = pcall(dofile, GetPluginInfo(GetPluginID(), 20).."areadata.lua")
+   if dok and type(adata) == "table" then AREADATA = adata end   -- bundled boot metadata
    windowinfo = movewindow.install(win, miniwin.pos_top_right,
       miniwin.create_absolute_location, false, nil, { mouseup = ex_titlebar }, { x = 10, y = 500 })
    WindowCreate(win, windowinfo.window_left, windowinfo.window_top, MINW, 40,
