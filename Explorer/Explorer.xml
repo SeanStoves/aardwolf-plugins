@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="3.1"
+   version="3.2"
 >
 <description trim="y">
 <![CDATA[
@@ -168,6 +168,16 @@ end
 local function esc (s) return tostring(s or ""):gsub('"', "'"):gsub("\n", " ") end
 local function safe (s) return tostring(s or "area"):gsub("[^%w]+", "_") end
 local function plugin_dir () return GetPluginInfo(GetPluginID(), 20) end
+
+-- exports go into a maps/ subfolder (gitignored). Ensure it exists; return its
+-- path, or the plugin dir as a fallback if we can't make it.
+local function map_dir ()
+   local d = plugin_dir() .. "maps"
+   local ok, lfs = pcall(require, "lfs")
+   if ok and lfs and lfs.mkdir then pcall(lfs.mkdir, d)
+   else pcall(os.execute, 'mkdir "' .. d .. '"') end
+   return d .. "/"
+end
 
 local function build_mermaid (name, rooms, exits)
    local byid = {}
@@ -349,7 +359,9 @@ local function export (kind, area_uid)   -- kind = "mermaid" | "json"
       else                       ext, body = "md",   build_mermaid(name, rooms, exits) end
       if not body then return "could not build map for "..name end
       local fn = "map_"..safe(name).."."..ext
-      return write_file(plugin_dir()..fn, body) and (kind.." -> "..fn) or "write failed"
+      if write_file(map_dir()..fn, body) then return kind.." -> maps/"..fn end
+      if write_file(plugin_dir()..fn, body) then return kind.." -> "..fn end   -- fallback
+      return "write failed"
    end)
    last_msg = res or ("db error: "..tostring(err))
    ColourNote("cyan","","Explorer: "..last_msg)
@@ -358,15 +370,15 @@ end
 local function export_all ()
    local res, err = with_db(function (db)
       local areas = query_rows(db, "SELECT uid,name FROM areas ORDER BY name")
-      local n = 0
+      local dir, n = map_dir(), 0
       for _, a in ipairs(areas) do
          local rooms, exits = area_map(db, a.uid)
          if #rooms > 0 then
             local s = build_svg(a.name, rooms, exits)
-            if s then write_file(plugin_dir().."map_"..safe(a.name)..".svg", s); n = n + 1 end
+            if s then write_file(dir.."map_"..safe(a.name)..".svg", s); n = n + 1 end
          end
       end
-      return n.." areas exported to the plugin folder"
+      return n.." areas exported to maps/"
    end)
    last_msg = res or ("db error: "..tostring(err))
    ColourNote("cyan","","Explorer: "..last_msg); paint()
