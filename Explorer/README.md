@@ -1,78 +1,58 @@
 # Explorer
 
-Builds a map of each Aardwolf area **from GMCP as you walk it** — records every
-room's name and exits, tracks coverage, and exports a **mermaid** flowchart (a
-gaardian-style map doc) plus raw **JSON** per area.
+Generates map docs straight from the **Aardwolf mapper's own database**. The
+mapper already knows every room it has seen — name, exits, terrain, flags, notes,
+coordinates — so Explorer reads that SQLite DB read-only and emits a **mermaid**
+flowchart (a gaardian-style map doc) plus raw **JSON**, for the area you're in, a
+named area, or every area at once. No re-walking; it uses what the mapper already
+recorded.
 
-It records the **actual command you type** to move, so warps and special exits
-(`enter portal`, `pull lever`, a maze word) become real edges labeled with the
-command — which makes even mazes followable: each edge tells you exactly what to
-type to make that move. You can also annotate rooms with notes.
-
-It only records where you go — it never moves your character.
+It reads the DB read-only — it never moves you or changes the map.
 
 ## Requires
 
-- the Aardwolf GMCP handler (`room.info`)
+- the Aardwolf GMCP mapper (`b6eae87ccedd84f510b74714`) and its database
+  (`Aardwolf.db` in the MUSHclient folder, by default)
 
 ## Window
 
-Four buttons + a live footer:
-
 | Button | Does |
 |--------|------|
-| **Export Mermaid map** | Write the current area's map to `map_<Area>.md` (a mermaid flowchart). |
-| **Export JSON** | Write the current area's rooms/exits to `map_<Area>.json`. |
-| **Show unexplored exits** | List the rooms here that still have exits to rooms you haven't recorded. |
-| **List recorded areas** | Every area you've mapped, with room counts. |
+| **Mermaid map (this area)** | Write the current area's map to `map_<Area>.md`. |
+| **JSON (this area)** | Write the current area's rooms + exits to `map_<Area>.json`. |
+| **Export ALL areas** | A mermaid file per area the mapper knows (many files). |
+| **List areas in DB** | Every area + room count. |
 
-Footer: current **Area**, **Rooms** recorded, **Unexplored exits** remaining
-(exits pointing at a room you haven't stepped into yet — walk those to finish the
-area).
+Footer shows the current **Area** and the last action. Files land in the plugin
+folder. Drag by the title bar, right-click to hide, type `explore` to summon it.
 
-Files are written to the plugin's own folder. Drag by the title bar, right-click
-to hide, type `explore` to summon it.
-
-## Commands (same as the buttons)
+## Commands
 
 ```
 explore                 show/hide the window
-explore mermaid | json  export the current area
-explore note <text>     note the room you're in (shows on the map)
-explore note            show this room's note
-explore new             rooms here with unexplored exits
-explore list            areas recorded
-explore clear           forget the current area (then 'explore clear yes')
+explore mermaid | json  the area you're in
+explore area <name>     map a named area (partial name ok)
+explore all             every area (many files)
+explore list [filter]   areas in the DB
 explore help            this
 ```
 
 ## Mermaid output
 
-Each room is a node (`r<roomid>["Room Name"]`); each move is a labeled edge:
+- Each room is a node showing **name + `#roomid`**, plus its **info flags**
+  (`shop`, `bank`, `pk`, `safe`, …) and any **notes** the mapper stored.
+- **Solid** edge `r100 -->|n| r101` = a normal direction; **dotted**
+  `r100 -.->|enter portal| r250` = a special/warp exit.
+- Exits leaving the area show the destination as a `?<br/>#id` stub, so you can
+  see where an area connects out.
+- Nodes are **colored by terrain** (forest, ocean, cave, …), gaardian-style.
+- Keyed by room **id**, so identical maze rooms stay distinct — follow the edges.
 
-- **Solid** `r100 -->|n| r101` — a normal direction.
-- **Dotted** `r100 -.->|enter portal| r250` — a warp or special command (anything
-  that isn't a plain direction). The label is the exact command you typed to make
-  the move, so you can follow it.
-- Rooms you haven't entered show as `?` nodes, so coverage gaps are visible.
-- Room notes render under the name in the node.
+Paste a file's contents anywhere mermaid renders (GitHub, many editors). The JSON
+carries the full room + exit data (names, terrain, flags, notes, coords) for
+building richer pages.
 
-Nodes are **colored by terrain** (forest, city, water, cave, …) from GMCP, so the
-map reads gaardian-style at a glance. Because nodes are keyed by room **id**,
-identical-looking maze rooms are distinct and the graph is the true connectivity —
-follow the edges, not the geography. Paste the file's contents anywhere mermaid
-renders (GitHub, many editors).
+## Note
 
-## Captured GMCP data
-
-Per room, from `room.info`: **name**, **exits** (dir → dest id), **terrain**,
-**details** (flags: bank/shop/safe/…), and **coord** (`id, x, y, cont`). The area
-records its numeric **areaid** too. All of it is in the JSON export — enough to
-build gaardian-style pages (terrain colors, coordinates, flags), not just the
-diagram.
-
-## Workflow
-
-Walk an area normally. When "Unexplored exits" hits 0 you've been everywhere the
-mapper can see. Click **Export Mermaid map** to save the diagram. Your data
-persists across sessions and accumulates as you explore.
+Reads whatever the mapper has walked. Areas you've never visited won't be in the
+DB — walk them once (the mapper records automatically) and they're available.
