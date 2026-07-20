@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Solao_Explorer"
+   author="Solao"
+   id="2d5a0a66f3a78e5a6f79554e"
+   language="Lua"
+   purpose="Records rooms/exits as you walk; tracks coverage; exports mermaid + JSON maps"
+   save_state="y"
+   date_written="2026-07-19 17:00:00"
+   requires="5.07"
+   version="1.0"
+>
+<description trim="y">
+<![CDATA[
+Explorer -- builds a map of each area from GMCP as YOU walk it. Records every
+room's name and exits, shows how much of the current area you've covered and
+which exits still lead somewhere new, and exports a mermaid flowchart (a
+gaardian-style map doc) + raw JSON per area.
+
+It only records what you walk into -- it never moves you. Needs the GMCP handler.
+
+  explore                 show/hide the window
+  explore mermaid         write the current area's mermaid map to a file
+  explore json            write the current area's data to a JSON file
+  explore new             list rooms in this area that still have unexplored exits
+  explore list            list every area you've recorded
+  explore clear           forget the current area (asks to confirm)
+  explore help            this
+]]>
+</description>
+</plugin>
+
+<include name="constants.lua"/>
+
+<aliases>
+  <alias match="^explore(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y" script="ex_cmd" sequence="100"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+require "movewindow"
+require "serialize"
+require "json"
+
+local GMCP = "3e7dedbe37e44942dd46d264"
+local win  = GetPluginID()
+local TITLE = "Explorer"
+local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+
+local cfg                       -- { areas = { [zone] = { name, rooms = { [id] = {name, exits={dir=dest}} } } }, font, size }
+local last_msg = "-"
+
+local function defaults () return { areas = {}, font = "Lucida Console", size = 9 } end
+
+local COL = {
+   bg=ColourNameToRGB("#0d1117"), bar=ColourNameToRGB("#161b2e"), btn=ColourNameToRGB("#1b2540"),
+   hover=ColourNameToRGB("#274060"), text=ColourNameToRGB("#e6e6e6"), dim=ColourNameToRGB("#8a93a8"),
+   accent=ColourNameToRGB("#e94560"), ok=ColourNameToRGB("#3ad07a"), border=ColourNameToRGB("#3a4a6b"),
+}
+local PAD, ROW_H, MINW = 6, 20, 210
+local hovered = nil
+local L = { width = MINW }
+
+----------------------------------------------------------------------
+-- gmcp
+----------------------------------------------------------------------
+local function gmcp (what)
+   local rc, val = CallPlugin(GMCP, "gmcpdata_as_string", what)
+   if rc ~= 0 then rc, val = CallPlugin(GMCP, "gmcpval", what) end
+   if not val or val == "" then return nil end
+   local ret
+   if not pcall(function() assert(loadstring("ret = "..val))() end) then return nil end
+   return ret
+end
+
+local function cur_zone () return gmcp("room.info.zone") end
+
+----------------------------------------------------------------------
+-- record the room we're standing in (only what we walk into)
+----------------------------------------------------------------------
+local function record ()
+   local r = gmcp("room.info")
+   if not r or not r.num then return end
+   local zone = r.zone or "(unknown)"
+   local a = cfg.areas[zone]
+   if not a then a = { name = zone, rooms = {} }; cfg.areas[zone] = a end
+   local id = tostring(r.num)
+   local room = a.rooms[id] or {}
+   room.name  = r.name or room.name
+   room.exits = {}
+   for dir, dest in pairs(r.exits or {}) do room.exits[dir] = tostring(dest) end
+   a.rooms[id] = room
+end
+
+-- coverage of a zone: rooms recorded, and exits that point to a room we haven't recorded
+local function coverage (zone)
+   local a = cfg.areas[zone]
+   if not a then return 0, 0 end
+   local rooms, unexplored = 0, {}
+   for id, room in pairs(a.rooms) do
+      rooms = rooms + 1
+      for _, dest in pairs(room.exits or {}) do
+         if not a.rooms[dest] and not unexplored[dest] then unexplored[dest] = true end
+      end
+   end
+   local n = 0; for _ in pairs(unexplored) do n = n + 1 end
+   return rooms, n
+end
+
+----------------------------------------------------------------------
+-- exports
+----------------------------------------------------------------------
+local function safe (s) return (s or "area"):gsub("[^%w]+", "_") end
+local function plugin_dir () return GetPluginInfo(GetPluginID(), 20) end
+
+local function build_mermaid (zone)
+   local a = cfg.areas[zone]
+   if not a then return nil end
+   local nodes = {}
+   for id, room in pairs(a.rooms) do nodes[id] = room.name or "?" end
+   for _, room in pairs(a.rooms) do
+      for _, dest in pairs(room.exits or {}) do
+         if not nodes[dest] then nodes[dest] = "?" end   -- unexplored neighbor
+      end
+   end
+   local out = { "```mermaid", "flowchart TD" }
+   for id, label in pairs(nodes) do
+      out[#out+1] = "  r"..id..'["'..label:gsub('"', "'")..'"]'
+   end
+   for id, room in pairs(a.rooms) do
+      for dir, dest in pairs(room.exits or {}) do
+         out[#out+1] = "  r"..id.." -->|"..dir.."| r"..dest
+      end
+   end
+   out[#out+1] = "```"
+   return table.concat(out, "\n")
+end
+
+local function write_file (path, text)
+   local f = io.open(path, "w")
+   if not f then return false end
+   f:write(text); f:close()
+   return true
+end
+
+local function export_mermaid (zone)
+   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; return end
+   local path = plugin_dir().."map_"..safe(zone)..".md"
+   local rooms = coverage(zone)
+   local body = "# "..zone.."\n\n"..rooms.." rooms recorded.\n\n"..build_mermaid(zone).."\n"
+   last_msg = write_file(path, body) and ("mermaid -> map_"..safe(zone)..".md") or "write failed"
+   ColourNote("cyan","","Explorer: "..last_msg)
+end
+
+local function export_json (zone)
+   if not zone or not cfg.areas[zone] then last_msg = "no data for this area"; return end
+   local path = plugin_dir().."map_"..safe(zone)..".json"
+   last_msg = write_file(path, json.encode(cfg.areas[zone])) and ("json -> map_"..safe(zone)..".json") or "write failed"
+   ColourNote("cyan","","Explorer: "..last_msg)
+end
+
+----------------------------------------------------------------------
+-- GMCP broadcast: record on room change
+----------------------------------------------------------------------
+function OnPluginBroadcast (msg, id, name, text)
+   if id == GMCP and text == "room.info" then record(); paint() end
+end
+
+----------------------------------------------------------------------
+-- rendering
+----------------------------------------------------------------------
+local BUTTONS = {
+   { key="mermaid", label="Export Mermaid map" },
+   { key="json",    label="Export JSON" },
+   { key="new",     label="Show unexplored exits" },
+   { key="list",    label="List recorded areas" },
+}
+local function fw (s) return WindowTextWidth(win, "f", s) end
+
+local function layout_metrics ()
+   L.fh = WindowFontInfo(win, "f", 1) or 12
+   L.title_h = L.fh + PAD
+   local w = WindowTextWidth(win, "fb", TITLE) + fw(" v"..PVER)
+   for _, b in ipairs(BUTTONS) do w = math.max(w, fw(b.label)) end
+   w = math.max(w, fw("Area: Some Long Area Name Here"))
+   L.width = math.max(MINW, w + PAD*2 + 12)
+   L.rows = {}
+   local y = L.title_h + PAD/2
+   for _, b in ipairs(BUTTONS) do L.rows[b.key] = y; y = y + ROW_H end
+   L.foot_y = y + PAD/2
+   L.height = L.foot_y + (L.fh * 3) + PAD
+end
+
+function paint ()
+   if not L.rows then return end
+   WindowRectOp(win, 2, 0, 0, 0, 0, COL.bg)
+   WindowRectOp(win, 2, 0, 0, L.width, L.title_h, COL.bar)
+   WindowText(win, "fb", TITLE, PAD, PAD/2, 0, 0, COL.accent)
+   WindowText(win, "f", " v"..PVER, PAD + WindowTextWidth(win,"fb",TITLE), PAD/2, 0, 0, COL.dim)
+
+   for _, b in ipairs(BUTTONS) do
+      local y = L.rows[b.key]
+      local bg = (hovered == "ex_"..b.key) and COL.hover or COL.btn
+      WindowRectOp(win, 2, PAD, y, L.width-PAD, y+ROW_H-3, bg)
+      WindowRectOp(win, 1, PAD, y, L.width-PAD, y+ROW_H-3, COL.border)
+      WindowText(win, "f", b.label, PAD+5, y+3, 0, 0, COL.text)
+   end
+
+   local zone = cur_zone()
+   local rooms, unexp = coverage(zone)
+   local y = L.foot_y
+   WindowText(win, "f", "Area: ", PAD, y, 0, 0, COL.dim)
+   WindowText(win, "fb", zone or "-", PAD + fw("Area: "), y, 0, 0, COL.ok)
+   y = y + L.fh + 1
+   WindowText(win, "f", "Rooms: "..rooms.."   Unexplored exits: "..unexp, PAD, y, 0, 0, COL.dim)
+   y = y + L.fh + 1
+   WindowText(win, "f", last_msg, PAD, y, 0, 0, COL.dim)
+
+   WindowRectOp(win, 1, 0, 0, L.width-1, L.height-1, COL.border)
+   WindowShow(win, true)
+   pcall(CallPlugin, "abc1a0944ae4af7586ce88dc", "BufferedRepaint")
+end
+
+local function show_unexplored (zone)
+   local a = zone and cfg.areas[zone]
+   if not a then ColourNote("orange","","Explorer: no data for this area"); return end
+   ColourNote("cyan","","Explorer: rooms with unexplored exits in "..zone..":")
+   for id, room in pairs(a.rooms) do
+      local outs = {}
+      for dir, dest in pairs(room.exits or {}) do
+         if not a.rooms[dest] then outs[#outs+1] = dir end
+      end
+      if #outs > 0 then
+         ColourNote("silver","","  "..(room.name or id).." ("..id.."): "..table.concat(outs, " "))
+      end
+   end
+end
+
+local function list_areas ()
+   local any = false
+   for zone in pairs(cfg.areas) do
+      local r = coverage(zone)
+      ColourNote("silver","","  "..zone.." -- "..r.." rooms"); any = true
+   end
+   if not any then ColourNote("orange","","Explorer: nothing recorded yet -- go walk somewhere") end
+end
+
+local function click_button (key)
+   local zone = cur_zone()
+   if     key == "mermaid" then export_mermaid(zone)
+   elseif key == "json"    then export_json(zone)
+   elseif key == "new"     then show_unexplored(zone)
+   elseif key == "list"    then list_areas() end
+   paint()
+end
+
+local function rebuild ()
+   layout_metrics()
+   WindowResize(win, L.width, L.height, COL.bg)
+   WindowDeleteAllHotspots(win)
+   for _, b in ipairs(BUTTONS) do
+      local y = L.rows[b.key]
+      WindowAddHotspot(win, "ex_"..b.key, PAD, y, L.width-PAD, y+ROW_H-3,
+         "ex_over", "ex_out", "", "", "ex_click", b.label, miniwin.cursor_hand, 0)
+   end
+   movewindow.add_drag_handler(win, 0, 0, L.width, L.title_h)
+   paint()
+end
+
+function ex_click (flags, id) click_button(id:gsub("^ex_", "")) end
+function ex_over  (flags, id) if hovered ~= id then hovered = id; paint() end end
+function ex_out   (flags, id) if hovered == id then hovered = nil; paint() end end
+
+function ex_titlebar (flags, id)
+   if bit.band(flags, miniwin.hotspot_got_rh_mouse) ~= 0 then
+      if WindowMenu(win, WindowInfo(win,14), WindowInfo(win,15), "Hide") == "Hide" then WindowShow(win, false) end
+   end
+end
+
+----------------------------------------------------------------------
+-- command
+----------------------------------------------------------------------
+local function help ()
+   ColourNote("cyan","","Explorer v"..PVER.." -- maps areas as you walk them")
+   ColourNote("yellow","","explore                 show/hide the window")
+   ColourNote("yellow","","explore mermaid | json  export the current area")
+   ColourNote("yellow","","explore new             rooms here with unexplored exits")
+   ColourNote("yellow","","explore list            areas recorded")
+   ColourNote("yellow","","explore clear           forget the current area")
+end
+
+function ex_cmd (name, line, wildcards)
+   local arg = (wildcards[1] or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+   local zone = cur_zone()
+   if arg == "" then
+      if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); paint() end
+   elseif arg == "help" or arg == "?" then help()
+   elseif arg == "mermaid" then export_mermaid(zone)
+   elseif arg == "json"    then export_json(zone)
+   elseif arg == "new"     then show_unexplored(zone)
+   elseif arg == "list"    then list_areas()
+   elseif arg == "clear"   then
+      if zone and cfg.areas[zone] then ColourNote("orange","","Explorer: type 'explore clear yes' to forget "..zone) end
+   elseif arg == "clear yes" then
+      if zone then cfg.areas[zone] = nil; last_msg = "cleared "..zone; paint(); ColourNote("cyan","","Explorer: cleared "..zone) end
+   else ColourNote("orange","","Explorer: unknown '"..arg.."'. Try 'explore help'.") end
+end
+
+----------------------------------------------------------------------
+-- lifecycle
+----------------------------------------------------------------------
+function OnPluginInstall ()
+   cfg = defaults()
+   local blob = GetVariable("cfg")
+   if blob then
+      local ok = pcall(function() assert(loadstring(blob))() end)
+      if ok and saved then for k, v in pairs(saved) do cfg[k] = v end; cfg.areas = cfg.areas or {} end
+   end
+   windowinfo = movewindow.install(win, miniwin.pos_top_right,
+      miniwin.create_absolute_location, false, nil, { mouseup = ex_titlebar }, { x = 10, y = 500 })
+   WindowCreate(win, windowinfo.window_left, windowinfo.window_top, MINW, 40,
+      windowinfo.window_mode, windowinfo.window_flags, COL.bg)
+   WindowFont(win, "f",  cfg.font, cfg.size, false, false, false, false, 0)
+   WindowFont(win, "fb", cfg.font, cfg.size, true,  false, false, false, 0)
+   rebuild()
+   record()          -- capture the room we log in to
+   WindowShow(win, true)
+end
+
+function OnPluginSaveState ()
+   SetVariable("cfg", "saved = "..serialize.save_simple(cfg))
+   if WindowInfo(win, 1) then movewindow.save_state(win) end
+end
+
+function OnPluginClose () WindowShow(win, false); WindowDelete(win) end
+]]>
+</script>
+</muclient>

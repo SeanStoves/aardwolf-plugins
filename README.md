@@ -15,6 +15,9 @@ depends on the folder a plugin lives in.
   (recalls, portals, held-item transports, shop runs, whatever you repeat), with
   optional arrival detection and use counters. Ships empty and fully
   user-configurable; nothing about your character is hardcoded.
+- **[Explorer](Explorer/README.md)** — maps each area from GMCP as you walk it:
+  records rooms + exits, tracks coverage and unexplored exits, and exports a
+  mermaid flowchart + JSON per area. Records only where you go; never moves you.
 
 ## License
 
