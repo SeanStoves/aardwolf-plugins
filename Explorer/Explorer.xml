@@ -10,25 +10,29 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="2.1"
+   version="3.0"
 >
 <description trim="y">
 <![CDATA[
 Explorer -- generates map docs from the Aardwolf mapper's own database. The
-mapper already knows every room it has seen (name, exits, terrain, flags, notes,
-coords), so Explorer reads that DB directly and emits a mermaid flowchart (a
-gaardian-style map doc, terrain-coloured, name + room id per node, special exits
-dotted) plus raw JSON -- for the area you're in, a named area, or all of them.
+mapper already knows every room it has seen (name, exits, terrain, flags, notes),
+so Explorer reads that DB directly and emits a gaardian-style **SVG grid map** --
+rooms laid out spatially from the exit graph, straight connectors, dashed for
+up/down and special exits, terrain-coloured, name + room id per room, full name
+on hover -- plus raw JSON. For the area you're in, a named area, or all of them.
+(A mermaid graph diagram is still available via 'explore mermaid'.)
 
 Reads the mapper DB read-only; it never moves you or changes the map. Needs the
 GMCP mapper (b6eae87ccedd84f510b74714) installed.
 
   explore                 show/hide the window
-  explore mermaid         mermaid map of the area you're in
+  explore svg             grid map (SVG) of the area you're in
   explore json            JSON of the area you're in
+  explore mermaid         graph diagram (auto-layout) instead
   explore area <name>     map a named area (partial name ok)
-  explore all             mermaid for every area (many files!)
+  explore all             SVG for every area (many files!)
   explore list            list areas in the mapper DB
+  explore info            level / runto / map links for this area
   explore help            this
 ]]>
 </description>
@@ -200,6 +204,113 @@ local function build_mermaid (name, rooms, exits)
    return "# "..name.."\n\n"..#rooms.." rooms. Solid = direction; dotted = special exit.\n\n"..table.concat(out, "\n").."\n"
 end
 
+----------------------------------------------------------------------
+-- gaardian-style grid map (SVG): lay rooms out from the exit graph
+----------------------------------------------------------------------
+local DELTA = { n={0,-1}, s={0,1}, e={1,0}, w={-1,0}, ne={1,-1}, nw={-1,-1}, se={1,1}, sw={-1,1},
+   north={0,-1}, south={0,1}, east={1,0}, west={-1,0} }
+local UD = { u=true, d=true, up=true, down=true }
+
+local function textcol (hx)
+   local r,g,b = tonumber(hx:sub(2,3),16), tonumber(hx:sub(4,5),16), tonumber(hx:sub(6,7),16)
+   return (0.299*r + 0.587*g + 0.114*b) > 140 and "#0d0d0d" or "#e6e6e6"
+end
+local function xmlesc (s)
+   return tostring(s or ""):gsub("&","&amp;"):gsub("<","&lt;"):gsub(">","&gt;"):gsub('"',"&quot;"):gsub("'","&#x27;")
+end
+
+local function layout (rooms, exits)
+   local idset = {}; for _, r in ipairs(rooms) do idset[r.uid] = true end
+   local adj = {}
+   for _, e in ipairs(exits) do
+      if idset[e.fromuid] and idset[e.touid] then
+         adj[e.fromuid] = adj[e.fromuid] or {}
+         table.insert(adj[e.fromuid], { dir = tostring(e.dir):lower(), to = e.touid })
+      end
+   end
+   local start, best = nil, -1
+   for _, r in ipairs(rooms) do
+      local n = adj[r.uid] and #adj[r.uid] or 0
+      if n > best then best, start = n, r.uid end
+   end
+   if not start then return {} end
+   local pos, occ = {}, {}
+   local function k (x, y) return x..","..y end
+   local function place (u, x, y)
+      while occ[k(x,y)] do
+         local moved = false
+         for _, dd in ipairs({{1,0},{0,1},{-1,0},{0,-1},{1,1},{-1,1},{1,-1},{-1,-1}}) do
+            if not occ[k(x+dd[1], y+dd[2])] then x, y, moved = x+dd[1], y+dd[2], true; break end
+         end
+         if not moved then x = x + 1 end
+      end
+      pos[u] = { x = x, y = y }; occ[k(x,y)] = true
+   end
+   place(start, 0, 0)
+   local q, head = { start }, 1
+   while head <= #q do
+      local u = q[head]; head = head + 1
+      local p = pos[u]
+      for _, ex in ipairs(adj[u] or {}) do
+         if not pos[ex.to] then
+            local d = ex.dir
+            if DELTA[d] then place(ex.to, p.x+DELTA[d][1], p.y+DELTA[d][2])
+            elseif UD[d] then place(ex.to, p.x+1, p.y-1)
+            else place(ex.to, p.x+1, p.y) end
+            q[#q+1] = ex.to
+         end
+      end
+   end
+   local fx = 0
+   for _, r in ipairs(rooms) do
+      if not pos[r.uid] then place(r.uid, fx, 999); fx = fx + 1 end
+   end
+   return pos
+end
+
+local function build_svg (name, rooms, exits)
+   local pos = layout(rooms, exits)
+   if not next(pos) then return nil end
+   local byid = {}; for _, r in ipairs(rooms) do byid[r.uid] = r end
+   local CW, CH, BW, BH = 84, 52, 72, 38
+   local minx, miny, maxx, maxy = 1e9, 1e9, -1e9, -1e9
+   for _, p in pairs(pos) do
+      minx=math.min(minx,p.x); miny=math.min(miny,p.y); maxx=math.max(maxx,p.x); maxy=math.max(maxy,p.y)
+   end
+   local W, H = (maxx-minx+1)*CW+20, (maxy-miny+1)*CH+40
+   local function cx (u) return (pos[u].x-minx)*CW+10+BW/2 end
+   local function cy (u) return (pos[u].y-miny)*CH+30+BH/2 end
+   local o = {
+      string.format('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" font-family="monospace">', W, H, W, H),
+      string.format('<rect width="%d" height="%d" fill="#0d1117"/>', W, H),
+      string.format('<text x="10" y="20" fill="#e94560" font-size="15">%s</text>', xmlesc(name)),
+   }
+   local seen = {}
+   for _, e in ipairs(exits) do
+      local a, b = e.fromuid, e.touid
+      if pos[a] and pos[b] then
+         local key = (a < b) and (a.."|"..b) or (b.."|"..a)
+         if not seen[key] then
+            seen[key] = true
+            local d = tostring(e.dir):lower()
+            local dash = (UD[d] or not DELTA[d]) and ' stroke-dasharray="4 3"' or ''
+            o[#o+1] = string.format('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#4a6a8a" stroke-width="2"%s/>', cx(a), cy(a), cx(b), cy(b), dash)
+         end
+      end
+   end
+   for u, p in pairs(pos) do
+      local r = byid[u]; local x, y = (p.x-minx)*CW+10, (p.y-miny)*CH+30
+      local col = TERRAIN_COLOR[tostring(r.terrain or ""):lower()] or "#1b2540"
+      local tc  = textcol(col)
+      local tip = xmlesc((r.name or "")..((r.info and r.info ~= "") and (" ["..r.info.."]") or "").." #"..u)
+      o[#o+1] = string.format('<rect x="%d" y="%d" width="%d" height="%d" rx="4" fill="%s" stroke="#3a4a6b"><title>%s</title></rect>', x, y, BW, BH, col, tip)
+      o[#o+1] = string.format('<text x="%d" y="%d" fill="%s" font-size="8" text-anchor="middle">%s</text>', x+BW/2, y+16, tc, xmlesc((r.name or ""):sub(1,12)))
+      o[#o+1] = string.format('<text x="%d" y="%d" fill="%s" font-size="8" text-anchor="middle">#%s</text>', x+BW/2, y+28, tc, u)
+   end
+   o[#o+1] = '</svg>'
+   return table.concat(o, "\n")
+end
+
 local function write_file (path, text)
    local f = io.open(path, "w")
    if not f then return false end
@@ -214,15 +325,13 @@ local function export (kind, area_uid)   -- kind = "mermaid" | "json"
       local name = area_name(db, uid)
       local rooms, exits = area_map(db, uid)
       if #rooms == 0 then return "mapper has no rooms for "..name end
-      local path, body
-      if kind == "json" then
-         path = plugin_dir().."map_"..safe(name)..".json"
-         body = json.encode({ area = name, uid = uid, rooms = rooms, exits = exits })
-      else
-         path = plugin_dir().."map_"..safe(name)..".md"
-         body = build_mermaid(name, rooms, exits)
-      end
-      return write_file(path, body) and (kind.." -> map_"..safe(name).."."..(kind=="json" and "json" or "md")) or "write failed"
+      local ext, body
+      if     kind == "json" then ext, body = "json", json.encode({ area = name, uid = uid, rooms = rooms, exits = exits })
+      elseif kind == "svg"  then ext, body = "svg",  build_svg(name, rooms, exits)
+      else                       ext, body = "md",   build_mermaid(name, rooms, exits) end
+      if not body then return "could not build map for "..name end
+      local fn = "map_"..safe(name).."."..ext
+      return write_file(plugin_dir()..fn, body) and (kind.." -> "..fn) or "write failed"
    end)
    last_msg = res or ("db error: "..tostring(err))
    ColourNote("cyan","","Explorer: "..last_msg)
@@ -235,8 +344,8 @@ local function export_all ()
       for _, a in ipairs(areas) do
          local rooms, exits = area_map(db, a.uid)
          if #rooms > 0 then
-            write_file(plugin_dir().."map_"..safe(a.name)..".md", build_mermaid(a.name, rooms, exits))
-            n = n + 1
+            local s = build_svg(a.name, rooms, exits)
+            if s then write_file(plugin_dir().."map_"..safe(a.name)..".svg", s); n = n + 1 end
          end
       end
       return n.." areas exported to the plugin folder"
@@ -259,10 +368,10 @@ end
 -- window
 ----------------------------------------------------------------------
 local BUTTONS = {
-   { key="mermaid", label="Mermaid map (this area)" },
+   { key="svg",     label="SVG map (this area)" },
    { key="json",    label="JSON (this area)" },
    { key="info",    label="Area info (level/runto/maps)" },
-   { key="all",     label="Export ALL areas" },
+   { key="all",     label="Export ALL as SVG" },
    { key="list",    label="List areas in DB" },
 }
 local function fw (s) return WindowTextWidth(win, "f", s) end
@@ -310,7 +419,7 @@ function paint ()
 end
 
 local function click_button (key)
-   if     key == "mermaid" then export("mermaid")
+   if     key == "svg"     then export("svg")
    elseif key == "json"    then export("json")
    elseif key == "info"    then show_info()
    elseif key == "all"     then export_all()
@@ -349,7 +458,8 @@ end
 ----------------------------------------------------------------------
 local function help ()
    ColourNote("cyan","","Explorer v"..PVER.." -- map docs from the mapper database")
-   ColourNote("yellow","","explore mermaid | json  the area you're in")
+   ColourNote("yellow","","explore svg | json      grid map / data for the area you're in")
+   ColourNote("yellow","","explore mermaid         graph diagram (auto-layout) instead of the grid")
    ColourNote("yellow","","explore info            level, runto, and map links for this area")
    ColourNote("yellow","","explore area <name>     a named area (partial ok)")
    ColourNote("yellow","","explore all             every area (many files)")
@@ -364,6 +474,7 @@ function ex_cmd (name, line, wildcards)
    if arg == "" then
       if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); paint() end
    elseif verb == "help" or verb == "?" then help()
+   elseif verb == "svg"     then export("svg")
    elseif verb == "mermaid" then export("mermaid")
    elseif verb == "json"    then export("json")
    elseif verb == "info"    then show_info()
@@ -376,7 +487,7 @@ function ex_cmd (name, line, wildcards)
          if not uid then return "no area matching '"..rest.."'" end
          return { uid = uid, name = nm }
       end)
-      if type(res) == "table" then export("mermaid", res.uid)
+      if type(res) == "table" then export("svg", res.uid)
       else ColourNote("orange","","Explorer: "..tostring(res or err)) end
    else ColourNote("orange","","Explorer: unknown '"..verb.."'. Try 'explore help'.") end
 end

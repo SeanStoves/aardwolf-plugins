@@ -18,10 +18,10 @@ It reads the DB read-only — it never moves you or changes the map.
 
 | Button | Does |
 |--------|------|
-| **Mermaid map (this area)** | Write the current area's map to `map_<Area>.md`. |
+| **SVG map (this area)** | Write a gaardian-style grid map to `map_<Area>.svg`. |
 | **JSON (this area)** | Write the current area's rooms + exits to `map_<Area>.json`. |
 | **Area info (level/runto/maps)** | Print this area's level range, `runto`, and clickable links to the gaardian / image / PDF maps. |
-| **Export ALL areas** | A mermaid file per area the mapper knows (many files). |
+| **Export ALL as SVG** | An SVG map per area the mapper knows (many files). |
 | **List areas in DB** | Every area + room count. |
 
 The area info comes from `areadata.lua` (bundled with the plugin, generated from
@@ -43,7 +43,20 @@ explore list [filter]   areas in the DB
 explore help            this
 ```
 
-## Mermaid output
+## SVG grid map
+
+`explore svg` (or the button) writes `map_<Area>.svg` — a gaardian-style **grid
+map**: rooms laid out spatially from the exit graph (`n`→up, `e`→right, …),
+straight connectors, **dashed** for up/down and special exits, terrain-colored
+rooms with the name + `#roomid` and the full name on hover. Open the `.svg` in a
+browser or drop it in a GitHub repo (they render inline). This is the default and
+matches the pre-generated library at
+[SeanStoves/aardwolf-maps](https://github.com/SeanStoves/aardwolf-maps).
+
+## Mermaid output (optional)
+
+`explore mermaid` still produces the auto-layout graph diagram if you want it —
+but it's not spatial (curvy). The SVG grid is the better map.
 
 - Each room is a node showing **name + `#roomid`**, plus its **info flags**
   (`shop`, `bank`, `pk`, `safe`, …) and any **notes** the mapper stored.
