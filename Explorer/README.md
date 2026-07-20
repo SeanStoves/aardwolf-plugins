@@ -57,9 +57,19 @@ Each room is a node (`r<roomid>["Room Name"]`); each move is a labeled edge:
 - Rooms you haven't entered show as `?` nodes, so coverage gaps are visible.
 - Room notes render under the name in the node.
 
-Because nodes are keyed by room **id**, identical-looking maze rooms are distinct
-and the graph is the true connectivity — follow the edges, not the geography.
-Paste the file's contents anywhere mermaid renders (GitHub, many editors).
+Nodes are **colored by terrain** (forest, city, water, cave, …) from GMCP, so the
+map reads gaardian-style at a glance. Because nodes are keyed by room **id**,
+identical-looking maze rooms are distinct and the graph is the true connectivity —
+follow the edges, not the geography. Paste the file's contents anywhere mermaid
+renders (GitHub, many editors).
+
+## Captured GMCP data
+
+Per room, from `room.info`: **name**, **exits** (dir → dest id), **terrain**,
+**details** (flags: bank/shop/safe/…), and **coord** (`id, x, y, cont`). The area
+records its numeric **areaid** too. All of it is in the JSON export — enough to
+build gaardian-style pages (terrain colors, coordinates, flags), not just the
+diagram.
 
 ## Workflow
 

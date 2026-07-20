@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="1.1"
+   version="1.2"
 >
 <description trim="y">
 <![CDATA[
@@ -64,6 +64,13 @@ local function defaults () return { areas = {}, font = "Lucida Console", size = 
 local CARDINAL = { n=1,s=1,e=1,w=1,u=1,d=1,ne=1,nw=1,se=1,sw=1,
    north=1,south=1,east=1,west=1,up=1,down=1,northeast=1,northwest=1,southeast=1,southwest=1 }
 local function is_dir (c) return CARDINAL[(c or ""):lower()] ~= nil end
+
+-- rough gaardian-ish terrain colors for the mermaid nodes
+local TERRAIN_COLOR = {
+   inside="#8a8a8a", city="#b0b0b0", field="#9acd32", forest="#228b22", hills="#c2b280",
+   mountains="#a0522d", water_swim="#4a90d9", water_noswim="#1f5f9e", underwater="#20507a",
+   air="#cfe8ff", desert="#e0c060", underground="#6b4a2b", cave="#5a4a3a", swamp="#556b2f",
+   jungle="#2e7d32", road="#c9c9a0", beach="#e8d8a0", ["deep water"]="#1f5f9e" }
 
 local COL = {
    bg=ColourNameToRGB("#0d1117"), bar=ColourNameToRGB("#161b2e"), btn=ColourNameToRGB("#1b2540"),
@@ -124,10 +131,14 @@ local function record ()
    pending_cmd, pending_from = nil, nil
 
    local room = a.rooms[id] or {}
-   room.name  = r.name or room.name
+   room.name    = r.name or room.name
+   room.terrain = r.terrain or room.terrain     -- forest / city / underground / ...
+   room.details = r.details or room.details     -- flags: bank, shop, safe, etc.
+   room.coord   = r.coord or room.coord         -- { id, x, y, cont }
    room.exits = {}
    for dir, dest in pairs(r.exits or {}) do room.exits[dir] = tostring(dest) end
    a.rooms[id] = room
+   if r.coord and r.coord.id then a.areaid = tostring(r.coord.id) end   -- numeric area id
    current_room = id
 end
 
@@ -185,6 +196,22 @@ local function build_mermaid (zone)
       local arrow = e.dotted and " -.->|" or " -->|"      -- dotted = warp / special command
       out[#out+1] = "  r"..e.from..arrow..(e.label:gsub("|","/")).."| r"..e.to
    end
+
+   -- terrain coloring (gaardian-style): a classDef per terrain, then tag rooms
+   local defined = {}
+   for id, room in pairs(a.rooms) do
+      local t = room.terrain
+      local col = t and TERRAIN_COLOR[t:lower()]
+      if col then
+         local cls = "t_"..t:gsub("%W", "_")
+         if not defined[cls] then
+            defined[cls] = true
+            out[#out+1] = "  classDef "..cls.." fill:"..col..",color:#111,stroke:#222"
+         end
+         out[#out+1] = "  class r"..id.." "..cls
+      end
+   end
+
    out[#out+1] = "```"
    return table.concat(out, "\n")
 end
