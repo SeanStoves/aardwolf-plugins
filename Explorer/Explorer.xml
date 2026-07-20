@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="3.0"
+   version="3.1"
 >
 <description trim="y">
 <![CDATA[
@@ -211,6 +211,19 @@ local DELTA = { n={0,-1}, s={0,1}, e={1,0}, w={-1,0}, ne={1,-1}, nw={-1,-1}, se=
    north={0,-1}, south={0,1}, east={1,0}, west={-1,0} }
 local UD = { u=true, d=true, up=true, down=true }
 
+-- normalize a stored exit dir: cardinal, a doored cardinal ("open south;south"),
+-- an up/down, or a true custom/warp exit ("enter portal", "catch ride")
+local function normdir (d)
+   d = tostring(d or ""):lower()
+   if DELTA[d] then return d, "dir" end
+   if UD[d]    then return d, "ud"  end
+   local last = d:match("[^;]+$") or ""
+   last = last:gsub("^%s+",""):gsub("%s+$","")
+   if DELTA[last] then return last, "door" end
+   if UD[last]    then return last, "udoor" end
+   return d, "custom"
+end
+
 local function textcol (hx)
    local r,g,b = tonumber(hx:sub(2,3),16), tonumber(hx:sub(4,5),16), tonumber(hx:sub(6,7),16)
    return (0.299*r + 0.587*g + 0.114*b) > 140 and "#0d0d0d" or "#e6e6e6"
@@ -225,7 +238,8 @@ local function layout (rooms, exits)
    for _, e in ipairs(exits) do
       if idset[e.fromuid] and idset[e.touid] then
          adj[e.fromuid] = adj[e.fromuid] or {}
-         table.insert(adj[e.fromuid], { dir = tostring(e.dir):lower(), to = e.touid })
+         local nd = normdir(e.dir)
+         table.insert(adj[e.fromuid], { nd = nd, to = e.touid })
       end
    end
    local start, best = nil, -1
@@ -253,7 +267,7 @@ local function layout (rooms, exits)
       local p = pos[u]
       for _, ex in ipairs(adj[u] or {}) do
          if not pos[ex.to] then
-            local d = ex.dir
+            local d = ex.nd
             if DELTA[d] then place(ex.to, p.x+DELTA[d][1], p.y+DELTA[d][2])
             elseif UD[d] then place(ex.to, p.x+1, p.y-1)
             else place(ex.to, p.x+1, p.y) end
@@ -285,19 +299,23 @@ local function build_svg (name, rooms, exits)
       string.format('<rect width="%d" height="%d" fill="#0d1117"/>', W, H),
       string.format('<text x="10" y="20" fill="#e94560" font-size="15">%s</text>', xmlesc(name)),
    }
-   local seen = {}
+   local seen, labels = {}, {}
    for _, e in ipairs(exits) do
       local a, b = e.fromuid, e.touid
       if pos[a] and pos[b] then
          local key = (a < b) and (a.."|"..b) or (b.."|"..a)
          if not seen[key] then
             seen[key] = true
-            local d = tostring(e.dir):lower()
-            local dash = (UD[d] or not DELTA[d]) and ' stroke-dasharray="4 3"' or ''
+            local _, kind = normdir(e.dir)
+            local dash = (kind == "ud" or kind == "udoor" or kind == "custom") and ' stroke-dasharray="4 3"' or ''
             o[#o+1] = string.format('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#4a6a8a" stroke-width="2"%s/>', cx(a), cy(a), cx(b), cy(b), dash)
+            if kind == "custom" then   -- label the warp command so it's followable
+               labels[#labels+1] = string.format('<text x="%d" y="%d" fill="#e0a030" font-size="7" text-anchor="middle">%s</text>', (cx(a)+cx(b))/2, (cy(a)+cy(b))/2, xmlesc(e.dir))
+            end
          end
       end
    end
+   for _, l in ipairs(labels) do o[#o+1] = l end
    for u, p in pairs(pos) do
       local r = byid[u]; local x, y = (p.x-minx)*CW+10, (p.y-miny)*CH+30
       local col = TERRAIN_COLOR[tostring(r.terrain or ""):lower()] or "#1b2540"
