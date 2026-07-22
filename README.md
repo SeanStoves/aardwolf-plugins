@@ -17,8 +17,12 @@ depends on the folder a plugin lives in.
   user-configurable; nothing about your character is hardcoded.
 - **[Explorer](Explorer/README.md)** — generates map docs from the Aardwolf
   mapper's own database: reads the mapper's rooms/exits/terrain/flags/notes and
-  exports a terrain-colored mermaid flowchart + JSON for any area. Read-only;
-  never moves you or changes the map.
+  exports a gaardian-style terrain-colored **SVG grid map** (+ JSON) for any area.
+  Read-only; never moves you or changes the map. Companion library:
+  [SeanStoves/aardwolf-maps](https://github.com/SeanStoves/aardwolf-maps).
+- **[Info Window](Info%20Window/README.md)** — captures `INFO:` lines into their
+  own draggable, resizable, scrollable miniwindow (keeping their colors) and gags
+  them from the main output.
 
 ## License
 

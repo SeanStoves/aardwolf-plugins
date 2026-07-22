@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 17:00:00"
    requires="5.07"
-   version="3.2"
+   version="3.3"
 >
 <description trim="y">
 <![CDATA[
@@ -475,7 +475,10 @@ function ex_over  (flags, id) if hovered ~= id then hovered = id; paint() end en
 function ex_out   (flags, id) if hovered == id then hovered = nil; paint() end end
 function ex_titlebar (flags, id)
    if bit.band(flags, miniwin.hotspot_got_rh_mouse) ~= 0 then
-      if WindowMenu(win, WindowInfo(win,14), WindowInfo(win,15), "Hide") == "Hide" then WindowShow(win, false) end
+      local r = WindowMenu(win, WindowInfo(win,14), WindowInfo(win,15), "Bring to Front|Send to Back|-|Hide")
+      if r == "Bring to Front" then CallPlugin("462b665ecb569efbf261422f", "boostMe", win)
+      elseif r == "Send to Back" then CallPlugin("462b665ecb569efbf261422f", "dropMe", win)
+      elseif r == "Hide" then WindowShow(win, false) end
    end
 end
 

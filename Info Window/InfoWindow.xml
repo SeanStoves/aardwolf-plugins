@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Solao_Info_Window"
+   author="Solao"
+   id="5b7cc8ce03719d83c64eb4fd"
+   language="Lua"
+   purpose="Capture INFO: lines into a scrollable dockable miniwindow, gagged from output"
+   save_state="y"
+   date_written="2026-07-19 23:00:00"
+   requires="5.07"
+   version="1.2"
+>
+<description trim="y">
+<![CDATA[
+Captures every 'INFO: ...' line into its own draggable, resizable, scrollable
+miniwindow (keeping the original colors) and gags it from the main output. Drag
+the title bar to move; drag the bottom-right grip to resize; mouse-wheel to
+scroll back. Type 'infowin' to show/hide.
+]]>
+</description>
+</plugin>
+
+<include name="constants.lua"/>
+
+<aliases>
+  <alias match="^infowin$" regexp="y" enabled="y" ignore_case="y" script="toggle" sequence="100"></alias>
+</aliases>
+
+<triggers>
+  <trigger enabled="y" regexp="y" omit_from_output="y" keep_evaluating="y" sequence="100"
+     match="^INFO: (.*)$" script="capture">
+  </trigger>
+
+  <!-- after an INFO, gag the single trailing blank Aardwolf pads it with
+       (same trick aard_chat_echo uses). The group is enabled in capture() and
+       disables itself after handling one line. -->
+  <trigger enabled="n" regexp="y" name="end_gag_omit" group="end_gag"
+     match="^$" omit_from_output="y" sequence="100" send_to="12">
+    <send>EnableTriggerGroup("end_gag", false)</send>
+  </trigger>
+  <trigger enabled="n" regexp="y" name="end_gag_keep" group="end_gag"
+     match="." omit_from_output="n" sequence="101" send_to="12">
+    <send>EnableTriggerGroup("end_gag", false)</send>
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+require "movewindow"
+require "serialize"
+
+local win  = GetPluginID()
+local TITLE = "INFO"
+local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+
+local cfg
+local lines   = {}      -- buffer: each entry = list of {text, colour}
+local scroll  = 0       -- lines scrolled up from the bottom
+local MAXBUF  = 500
+local drag_x0, drag_y0, drag_w0, drag_h0
+
+local COL = {
+   bg=ColourNameToRGB("#0d1117"), bar=ColourNameToRGB("#161b2e"),
+   dim=ColourNameToRGB("#8a93a8"), accent=ColourNameToRGB("#e94560"), border=ColourNameToRGB("#3a4a6b"),
+   deftext=ColourNameToRGB("#c8d0dc"),
+}
+local PAD = 5
+
+local function defaults () return { x=nil, y=nil, w=420, h=200, font="Lucida Console", size=9 } end
+
+local function fh () return WindowFontInfo(win, "f", 1) or 12 end
+local function title_h () return fh() + PAD end
+local function lineh () return fh() + 1 end
+local function visible () return math.max(1, math.floor((cfg.h - title_h() - PAD*2) / lineh())) end
+local function maxscroll () return math.max(0, #lines - visible()) end
+
+local function repaint ()
+   WindowShow(win, true)
+   pcall(CallPlugin, "abc1a0944ae4af7586ce88dc", "BufferedRepaint")
+end
+
+local function paint ()
+   WindowRectOp(win, 2, 0, 0, 0, 0, COL.bg)
+   WindowRectOp(win, 2, 0, 0, cfg.w, title_h(), COL.bar)
+   WindowText(win, "fb", TITLE, PAD, PAD/2, 0, 0, COL.accent)
+   if scroll > 0 then WindowText(win, "f", "  (scrolled +"..scroll..")", PAD + WindowTextWidth(win,"fb",TITLE), PAD/2, 0, 0, COL.dim) end
+
+   local vis = visible()
+   local last = #lines - scroll
+   local first = math.max(1, last - vis + 1)
+   local y = title_h() + PAD
+   for i = first, last do
+      local x = PAD
+      for _, r in ipairs(lines[i]) do
+         WindowText(win, "f", r.text, x, y, 0, 0, r.colour or COL.deftext)
+         x = x + WindowTextWidth(win, "f", r.text)
+      end
+      y = y + lineh()
+   end
+
+   -- resize grip (bottom-right)
+   for i = 1, 3 do
+      local o = i*3
+      WindowLine(win, cfg.w-o-2, cfg.h-2, cfg.w-2, cfg.h-o-2, COL.dim, 0, 1)
+   end
+   WindowRectOp(win, 1, 0, 0, cfg.w-1, cfg.h-1, COL.border)
+   repaint()
+end
+
+----------------------------------------------------------------------
+-- capture (trigger) : keep the original colors via the styles arg
+----------------------------------------------------------------------
+function capture (name, line, wildcards, styles)
+   local runs = {}
+   for _, s in ipairs(styles or {}) do runs[#runs+1] = { text = s.text, colour = s.textcolour } end
+   if #runs == 0 then runs = {{ text = line, colour = COL.deftext }} end
+   lines[#lines+1] = runs
+   if #lines > MAXBUF then table.remove(lines, 1) end
+   if scroll > 0 then scroll = math.min(maxscroll(), scroll + 1) end   -- hold view if scrolled up
+   EnableTriggerGroup("end_gag", true)   -- gag the trailing blank Aardwolf pads INFO with
+   paint()
+end
+
+----------------------------------------------------------------------
+-- window plumbing
+----------------------------------------------------------------------
+local function add_hotspots ()
+   WindowDeleteAllHotspots(win)
+   WindowAddHotspot(win, "body", 0, title_h(), cfg.w, cfg.h, "","","","","", "", miniwin.cursor_arrow, 0)
+   WindowScrollwheelHandler(win, "body", "on_wheel")
+   local g = math.max(12, fh())
+   WindowAddHotspot(win, "grip", cfg.w-g, cfg.h-g, cfg.w, cfg.h, "","","grip_down","","", "drag to resize", miniwin.cursor_hand, 0)
+   WindowDragHandler(win, "grip", "grip_move", "grip_up", 0)
+   movewindow.add_drag_handler(win, 0, 0, cfg.w, title_h())
+end
+
+local function relayout ()
+   WindowResize(win, cfg.w, cfg.h, COL.bg)
+   add_hotspots()
+   paint()
+end
+
+function on_wheel (flags, id)
+   local up = bit.band(flags, 0x100) == 0
+   if up then scroll = math.min(maxscroll(), scroll + 3)
+   else       scroll = math.max(0, scroll - 3) end
+   paint()
+end
+
+function grip_down (flags, id)
+   drag_x0, drag_y0, drag_w0, drag_h0 = WindowInfo(win,17), WindowInfo(win,18), cfg.w, cfg.h
+end
+function grip_move (flags, id)
+   cfg.w = math.max(180, drag_w0 + (WindowInfo(win,17) - (drag_x0 or 0)))
+   cfg.h = math.max(80,  drag_h0 + (WindowInfo(win,18) - (drag_y0 or 0)))
+   WindowResize(win, cfg.w, cfg.h, COL.bg)   -- resize + repaint only; DON'T rebuild
+   paint()                                   -- (would delete the live grip hotspot)
+   SetCursor(miniwin.cursor_hand)
+end
+function grip_up (flags, id) add_hotspots(); SaveState() end   -- now safe to re-place hotspots
+
+function titlebar (flags, id)
+   if bit.band(flags, miniwin.hotspot_got_rh_mouse) ~= 0 then
+      local r = WindowMenu(win, WindowInfo(win,14), WindowInfo(win,15), "Bring to Front|Send to Back|-|Hide|Clear")
+      if r == "Bring to Front" then CallPlugin("462b665ecb569efbf261422f", "boostMe", win)
+      elseif r == "Send to Back" then CallPlugin("462b665ecb569efbf261422f", "dropMe", win)
+      elseif r == "Hide" then WindowShow(win, false)
+      elseif r == "Clear" then lines = {}; scroll = 0; paint() end
+   end
+end
+
+function toggle ()
+   if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); paint() end
+end
+
+----------------------------------------------------------------------
+-- lifecycle
+----------------------------------------------------------------------
+function OnPluginInstall ()
+   cfg = defaults()
+   local blob = GetVariable("cfg")
+   if blob then
+      local ok = pcall(function() assert(loadstring(blob))() end)
+      if ok and saved then for k, v in pairs(saved) do cfg[k] = v end end
+   end
+   windowinfo = movewindow.install(win, miniwin.pos_top_left,
+      miniwin.create_absolute_location, false, nil, { mouseup = titlebar }, { x = cfg.x or 10, y = cfg.y or 40 })
+   WindowCreate(win, windowinfo.window_left, windowinfo.window_top, cfg.w, cfg.h,
+      windowinfo.window_mode, windowinfo.window_flags, COL.bg)
+   WindowFont(win, "f",  cfg.font, cfg.size, false, false, false, false, 0)
+   WindowFont(win, "fb", cfg.font, cfg.size, true,  false, false, false, 0)
+   relayout()
+   WindowShow(win, true)
+end
+
+function OnPluginSaveState ()
+   SetVariable("cfg", "saved = "..serialize.save_simple(cfg))
+   if WindowInfo(win, 1) then movewindow.save_state(win) end
+end
+
+function OnPluginClose () WindowShow(win, false); WindowDelete(win) end
+]]>
+</script>
+</muclient>
