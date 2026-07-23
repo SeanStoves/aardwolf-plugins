@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.1"
+   version="2.2"
 >
 </plugin>
 
@@ -177,7 +177,9 @@ end
 ------------------------------------------------------------------
 -- online model
 ------------------------------------------------------------------
-local ONLINE_TTL = 900   -- who sighting = "online" for 15 min
+-- not seen by a 'who' in this long = offline. Matches the Who Poller's 10 minute
+-- cadence: every poll refreshes everyone still on, so anyone who ages out is gone.
+local ONLINE_TTL = 600
 
 local function is_online (r)
    if r.on == false then return false end
