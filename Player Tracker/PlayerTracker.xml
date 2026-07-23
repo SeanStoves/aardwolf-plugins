@@ -109,7 +109,7 @@ local DECOR = {
    {"|Watchmen|","watchmen"}, {"TouchStone","touchstone"}, {"imson|","crimson"}, {"erdition","perdition"},
    {"aardian|","gaardian"}, {"Loqui|","loqui"}, {"/Pyre","pyre"}, {"IMPERIUM","imperium"},
    {"ibution-","retribution"}, {"[Loner]","loner"}, {"|Wolf|","wolf"}, {"}Tao{","tao"},
-   {"/|\\","druid"},
+   {"/|\\","druid"}, {"Rhabdo/","rhabdo"},
 }
 local CLAN = {
    wolf="The Wolf Administration", loner="The Lone Adventurers", outcast="The Outcast Clan of Shame",
