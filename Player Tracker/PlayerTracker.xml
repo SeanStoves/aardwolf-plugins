@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.0"
+   version="2.1"
 >
 </plugin>
 
@@ -32,10 +32,11 @@
      sequence="100"
   ><send>on_who("%0")</send></trigger>
 
-  <!-- who footer: "Players found: 217" -> close the snapshot, feed the average -->
+  <!-- who footer: "Players found: [216], Max this reboot: [247]..." -> close the
+       snapshot + feed the average. The count is bracketed. -->
   <trigger
      enabled="y"
-     match="^Players found\: *(\d+)"
+     match="^Players found\: *\[?(\d+)"
      regexp="y"
      send_to="12"
      sequence="100"
