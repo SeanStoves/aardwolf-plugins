@@ -27,10 +27,6 @@ depends on the folder a plugin lives in.
   `who` sees: one record per player with clan, ranks, level, title and last-seen,
   in a searchable miniwindow. Clickable names, a search bar, seen/online/avg
   stats, and live online/offline for your own clan.
-- **[Who Poller](Who%20Poller/README.md)** — sends `who` on a timer and eats the
-  reply so it never hits your screen, keeping Player Tracker fed. The gag is
-  armed only for the length of that reply, with a safety release; polls are
-  skipped while you're flagged AFK.
 
 ## License
 
