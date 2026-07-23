@@ -23,6 +23,10 @@ depends on the folder a plugin lives in.
 - **[Info Window](Info%20Window/README.md)** — captures `INFO:` lines into their
   own draggable, resizable, scrollable miniwindow (keeping their colors) and gags
   them from the main output.
+- **[Player Tracker](Player%20Tracker/README.md)** — remembers everyone your
+  `who` sees: one record per player with clan, ranks, level, title and last-seen,
+  in a searchable miniwindow. Clickable names, a search bar, seen/online/avg
+  stats, and live online/offline for your own clan.
 
 ## License
 

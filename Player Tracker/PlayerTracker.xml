@@ -1,0 +1,568 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Solao_Player_Tracker"
+   author="Solao"
+   id="bf330fff476a885e5892aefe"
+   language="Lua"
+   purpose="Tracks every player seen in 'who' -- clan, ranks, title, online/offline, searchable"
+   requires="5.07"
+   save_state="y"
+   date_written="2026-07-19"
+   version="2.0"
+>
+</plugin>
+
+<!--
+ Player Tracker: captures every line of 'who', stores each player once (keyed on
+ name), keeps their clan / ranks / title / level and a last-seen timestamp. The
+ miniwindow shows stats plus a searchable, clickable list. Online/offline is only
+ truly knowable for your own clan (login/logout notices), so that drives the dot
+ for clanmates; everyone else is "online" for a while after the last who sighting.
+-->
+
+<triggers>
+  <!-- every who row: [<name/level box>] then content. Matches all clans + unclanned. -->
+  <trigger
+     enabled="y"
+     match="^\[.{13,16}\] .+$"
+     regexp="y"
+     send_to="12"
+     sequence="100"
+  ><send>on_who("%0")</send></trigger>
+
+  <!-- who footer: "Players found: 217" -> close the snapshot, feed the average -->
+  <trigger
+     enabled="y"
+     match="^Players found\: *(\d+)"
+     regexp="y"
+     send_to="12"
+     sequence="100"
+  ><send>who_done(tonumber("%1"))</send></trigger>
+
+  <!-- your clan (Boot) login/logout flavor: the only live online/offline signal -->
+  <trigger
+     enabled="y"
+     match="^CLAN\: (\w+) is in attendance"
+     regexp="y"
+     send_to="12"
+     sequence="100"
+  ><send>clan_login("%1")</send></trigger>
+
+  <trigger
+     enabled="y"
+     match="^CLAN\: (\w+) has had enough of learning"
+     regexp="y"
+     send_to="12"
+     sequence="100"
+  ><send>clan_logout("%1")</send></trigger>
+</triggers>
+
+<aliases>
+  <alias match="^playertracker(?:\s+(.*))?$" regexp="y" enabled="y" send_to="12"><send>pt_cmd("%1")</send></alias>
+  <alias match="^pt(?:\s+(.*))?$"            regexp="y" enabled="y" send_to="12"><send>pt_cmd("%1")</send></alias>
+</aliases>
+
+<include name="constants.lua"/>
+
+<script>
+<![CDATA[
+require "movewindow"
+local serialize = require "serialize"
+
+local TITLE = "Player Tracker"
+local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+local ZPLUG = "462b665ecb569efbf261422f"   -- z-order monitor plugin
+local win   = GetPluginID()
+local FONT  = "ptf"
+
+------------------------------------------------------------------
+-- config (persisted) + runtime
+------------------------------------------------------------------
+local function defaults ()
+   return {
+      width = 300, height = 360, size = 9, font = "Dina",
+      ontop = true,
+      players = {},               -- name:lower -> rec
+      avg = { sum = 0, n = 0 },   -- rolling online average
+   }
+end
+local cfg = defaults()
+local windowinfo
+
+local view      = {}     -- filtered + sorted list currently drawn
+local filter    = ""
+local scroll    = 0
+local capturing = false
+local who_seen  = {}
+local fh        = 14     -- font pixel height
+local drag_x0, drag_y0, drag_w0, drag_h0
+
+------------------------------------------------------------------
+-- clan decoration -> short tag (punctuation-anchored, title-safe)
+------------------------------------------------------------------
+local DECOR = {
+   {"|| BOOT ||","boot"}, {"}HooK{","hook"}, {")light(","light"}, {"(Seekers)","seekers"},
+   {"[Emerald]","emerald"}, {"[Ba'al]","baal"}, {"-=Masaki=-","masaki"}, {"winlobe","twinlobe"},
+   {"|Watchmen|","watchmen"}, {"TouchStone","touchstone"}, {"imson|","crimson"}, {"erdition","perdition"},
+   {"aardian|","gaardian"}, {"Loqui|","loqui"}, {"/Pyre","pyre"}, {"IMPERIUM","imperium"},
+   {"ibution-","retribution"}, {"[Loner]","loner"}, {"|Wolf|","wolf"}, {"}Tao{","tao"},
+   {"/|\\","druid"},
+}
+local CLAN = {
+   wolf="The Wolf Administration", loner="The Lone Adventurers", outcast="The Outcast Clan of Shame",
+   twinlobe="The Fellowship of the Twin Lobes", watchmen="The Watchmen of Aardwolf", seekers="The Seekers",
+   emerald="The Emerald Knights", light="The Order of Light", baal="The Children of Ba'alzamon",
+   hook="The Hook Clan", bard="Order of the Bard", crusader="Crusaders of the Nameless One",
+   xunti="The Xunti Cult", imperium="Clan Imperium", crimson="The Crimson Horde", retribution="Retribution",
+   druid="The Great Circle of Druids", amazon="The Tribes of the Amazon", pyre="The Soul Pyre",
+   masaki="Masaki Clan", rhabdo="Dark Templars of Rhabdo Rana", perdition="Knights of Perdition",
+   loqui="Loqui", gaardian="The Midgaardian Publishing Group", tao="The Creation of Tao",
+   touchstone="House of Touchstone", boot="Boot Lyceum",
+}
+local function clan_full (t) return CLAN[t or ""] or "" end
+
+local function detect_clan (line)
+   for _, d in ipairs(DECOR) do
+      if line:find(d[1], 1, true) then return d[2] end
+   end
+   return ""
+end
+
+------------------------------------------------------------------
+-- parse one who row
+------------------------------------------------------------------
+local function trim (s) return (s or ""):gsub("^%s+",""):gsub("%s+$","") end
+
+local FLAGS = { "%*AFK%*", "%(OPK%)", "%(HARDCORE%)", "%(Linkdead%)" }
+
+local function parse (line)
+   local info, body = line:match("^%[(.-)%]%s*(.*)$")
+   if not info then return nil end
+   info, body = trim(info), trim(body)
+
+   -- peel any leading [Rank]/[Position] brackets and who flags, in any order,
+   -- until the name is at the front (clan tags like [Ba'al] sit at the tail, safe)
+   local ranks = ""
+   local changed = true
+   while changed do
+      changed = false
+      local rtag, rest = body:match("^%[([^%]]+)%]%s*(.*)$")
+      if rtag then
+         ranks = ranks == "" and trim(rtag) or (ranks .. " " .. trim(rtag))
+         body, changed = trim(rest), true
+      end
+      for _, f in ipairs(FLAGS) do
+         local nb = body:gsub("^" .. f .. "%s*", "", 1)
+         if nb ~= body then body, changed = nb, true end
+      end
+   end
+
+   local clan = detect_clan(line)
+   local title = body
+   local cut
+   for _, d in ipairs(DECOR) do
+      local p = body:find(d[1], 1, true)
+      if p then cut = math.min(cut or 1e9, p) end
+   end
+   if cut then title = trim(body:sub(1, cut - 1)) end
+
+   local name = title:match("^(%S+)")
+   if not name then return nil end
+   return { name = name, title = title, ranks = ranks, clan = clan, info = info }
+end
+
+------------------------------------------------------------------
+-- online model
+------------------------------------------------------------------
+local ONLINE_TTL = 900   -- who sighting = "online" for 15 min
+
+local function is_online (r)
+   if r.on == false then return false end
+   return r.on == true and (os.time() - (r.seen or 0) < ONLINE_TTL)
+end
+local function ago (t)
+   if not t then return "?" end
+   local d = os.time() - t
+   if d < 60 then return d.."s" end
+   if d < 3600 then return math.floor(d/60).."m" end
+   if d < 86400 then return math.floor(d/3600).."h" end
+   return math.floor(d/86400).."d"
+end
+
+------------------------------------------------------------------
+-- capture
+------------------------------------------------------------------
+function on_who (line)
+   local p = parse(line)
+   if not p then return end
+   if not capturing then capturing, who_seen = true, {} end
+   local key = p.name:lower()
+   who_seen[key] = true
+
+   local r = cfg.players[key] or {}
+   r.name  = p.name
+   r.title = p.title
+   if p.ranks ~= "" then r.ranks = p.ranks end
+   if p.clan  ~= "" then r.clan  = p.clan  end
+   r.info = p.info
+   r.seen = os.time()
+   r.on   = true
+   cfg.players[key] = r
+end
+
+function who_done (n)
+   capturing = false
+   if n and n > 0 then cfg.avg.sum = cfg.avg.sum + n; cfg.avg.n = cfg.avg.n + 1 end
+   rebuild()
+   SaveState()
+end
+
+function clan_login (name)
+   local key = name:lower()
+   local r = cfg.players[key] or { name = name }
+   r.name = r.name or name
+   r.on, r.seen = true, os.time()
+   cfg.players[key] = r
+   rebuild()
+end
+
+function clan_logout (name)
+   local r = cfg.players[name:lower()]
+   if r then r.on = false; rebuild() end
+end
+
+------------------------------------------------------------------
+-- stats + view
+------------------------------------------------------------------
+local function count_seen () local n=0; for _ in pairs(cfg.players) do n=n+1 end; return n end
+local function count_online () local n=0; for _,r in pairs(cfg.players) do if is_online(r) then n=n+1 end end; return n end
+local function avg_online () if cfg.avg.n == 0 then return 0 end; return math.floor(cfg.avg.sum/cfg.avg.n + 0.5) end
+
+local function build_view ()
+   view = {}
+   local f = filter:lower()
+   for _, r in pairs(cfg.players) do
+      local hay = (r.name.." "..(r.title or "").." "..clan_full(r.clan)):lower()
+      if f == "" or hay:find(f, 1, true) then view[#view+1] = r end
+   end
+   table.sort(view, function (a, b)
+      local ao, bo = is_online(a), is_online(b)
+      if ao ~= bo then return ao end
+      return (a.seen or 0) > (b.seen or 0)
+   end)
+end
+
+------------------------------------------------------------------
+-- geometry
+------------------------------------------------------------------
+local PAD = 6
+local function title_h () return fh + 4 end
+local function stats_top () return title_h() + PAD end
+local function search_top () return stats_top() + fh*2 + 2 end
+local function list_top () return search_top() + fh + PAD + 6 end
+local function row_h () return fh + 2 end
+local function vis_rows () return math.max(0, math.floor((cfg.height - list_top() - PAD) / row_h())) end
+
+------------------------------------------------------------------
+-- colors (0xBBGGRR) + paint
+------------------------------------------------------------------
+local COL = {
+   bg=0x1A1A1A, bar=0x2E2E2E, accent=0x66CCFF, dim=0x999999,
+   text=0xE0E0E0, online=0x33CC33, offline=0x666666, box=0x3A3A3A,
+}
+local function txt (x, y, s, col, right)
+   local w = WindowTextWidth(win, FONT, s)
+   if right then x = x - w end
+   WindowText(win, FONT, s, x, y, 0, 0, col)
+   return w
+end
+
+function paint ()
+   WindowRectOp(win, 2, 0, 0, 0, 0, COL.bg)
+
+   WindowRectOp(win, 2, 0, 0, 0, title_h(), COL.bar)
+   local tw = txt(PAD, 2, TITLE, COL.accent)
+   txt(PAD + tw + 5, 3, "v"..PVER, COL.dim)
+
+   local y = stats_top()
+   txt(PAD, y, "Seen: "..count_seen(), COL.text)
+   txt(cfg.width - PAD, y, "Online: "..count_online(), COL.online, true)
+   txt(PAD, y + fh, "Avg online: "..avg_online(), COL.dim)
+
+   local sy = search_top()
+   WindowRectOp(win, 2, PAD, sy, cfg.width - PAD, sy + fh + 2, COL.box)
+   WindowRectOp(win, 1, PAD, sy, cfg.width - PAD, sy + fh + 2, COL.bar)
+   if filter ~= "" then
+      txt(PAD + 4, sy + 1, "Search: "..filter, COL.text)
+      txt(cfg.width - PAD - 5, sy + 1, "x", COL.dim, true)
+   else
+      txt(PAD + 4, sy + 1, "Search... (click)", COL.dim)
+   end
+
+   local ly, rows = list_top(), vis_rows()
+   if #view == 0 then
+      txt(PAD, ly, filter ~= "" and "No matches." or "No players yet -- type 'who'.", COL.dim)
+   else
+      local first = scroll + 1
+      for i = 0, rows - 1 do
+         local r = view[first + i]
+         if not r then break end
+         local ry = ly + i * row_h()
+         local on = is_online(r)
+         WindowCircleOp(win, 2, PAD+1, ry+3, PAD+8, ry+10,
+            on and COL.online or COL.offline, 0, 1, on and COL.online or COL.offline, 1)
+         local nx = PAD + 13
+         local nw = txt(nx, ry, r.name, on and COL.text or COL.dim)
+         if r.clan and r.clan ~= "" then txt(nx + nw + 6, ry, "("..r.clan..")", COL.accent) end
+         txt(cfg.width - PAD, ry, ago(r.seen), COL.dim, true)
+      end
+      if #view > rows then
+         local more = #view - (scroll + rows)
+         if more > 0 then txt(cfg.width - PAD, cfg.height - fh, "+"..more.." more", COL.dim, true) end
+      end
+   end
+
+   -- resize grip
+   WindowLine(win, cfg.width-9, cfg.height-3, cfg.width-3, cfg.height-9, COL.dim, 0, 1)
+   WindowLine(win, cfg.width-6, cfg.height-3, cfg.width-3, cfg.height-6, COL.dim, 0, 1)
+end
+
+------------------------------------------------------------------
+-- layout / hotspots
+------------------------------------------------------------------
+function rebuild ()
+   build_view()
+   local maxs = math.max(0, #view - vis_rows())
+   if scroll > maxs then scroll = maxs end
+
+   WindowResize(win, cfg.width, cfg.height, COL.bg)
+   WindowDeleteAllHotspots(win)
+
+   -- search bar
+   local sy = search_top()
+   WindowAddHotspot(win, "search", PAD, sy, cfg.width - PAD, sy + fh + 2,
+      "", "", "hs_search", "", "", "click to search", miniwin.cursor_hand, 0)
+
+   -- rows
+   local ly, rows = list_top(), vis_rows()
+   local first = scroll + 1
+   for i = 0, rows - 1 do
+      local r = view[first + i]
+      if not r then break end
+      local ry = ly + i * row_h()
+      local id = "row_" .. (first + i)
+      WindowAddHotspot(win, id, PAD, ry, cfg.width - PAD, ry + row_h(),
+         "", "", "hs_row", "", "", "click for info", miniwin.cursor_hand, 0)
+      WindowScrollwheelHandler(win, id, "hs_wheel")
+   end
+
+   -- body (wheel over empty space)
+   WindowAddHotspot(win, "body", 0, ly, cfg.width, cfg.height, "", "", "", "", "", "", 0, 0)
+   WindowScrollwheelHandler(win, "body", "hs_wheel")
+
+   -- resize grip
+   local g = math.max(12, fh)
+   WindowAddHotspot(win, "grip", cfg.width-g, cfg.height-g, cfg.width, cfg.height,
+      "", "", "hs_grip_down", "", "", "drag to resize", miniwin.cursor_hand, 0)
+   WindowDragHandler(win, "grip", "hs_grip_move", "hs_grip_done", 0)
+
+   -- title drag (re-add after DeleteAll)
+   movewindow.add_drag_handler(win, 0, 0, cfg.width, title_h())
+
+   paint()
+end
+
+------------------------------------------------------------------
+-- hotspot handlers
+------------------------------------------------------------------
+function hs_row (flags, id)
+   local n = tonumber(id:match("row_(%d+)"))
+   local r = n and view[n]
+   if r then show_info(r.name) end
+end
+
+function hs_search (flags, id)
+   if filter ~= "" and WindowInfo(win, 14) >= cfg.width - PAD - 14 then
+      filter = ""; scroll = 0; rebuild(); return
+   end
+   local q = utils.inputbox("Search players by name, clan or title.\nLeave blank to show everyone.", TITLE, filter)
+   if q ~= nil then filter = trim(q); scroll = 0; rebuild() end
+end
+
+function hs_wheel (flags, id)
+   local dir = (bit.band(flags, 0x100) ~= 0) and 1 or -1
+   local maxs = math.max(0, #view - vis_rows())
+   scroll = math.max(0, math.min(maxs, scroll + dir))
+   rebuild()
+end
+
+function hs_grip_down (flags, id)
+   drag_x0, drag_y0 = WindowInfo(win, 17), WindowInfo(win, 18)
+   drag_w0, drag_h0 = cfg.width, cfg.height
+end
+function hs_grip_move (flags, id)
+   local nw = math.max(220, drag_w0 + (WindowInfo(win,17) - drag_x0))
+   local nh = math.max(160, drag_h0 + (WindowInfo(win,18) - drag_y0))
+   if nw ~= cfg.width or nh ~= cfg.height then
+      cfg.width, cfg.height = nw, nh
+      WindowResize(win, cfg.width, cfg.height, COL.bg)   -- resize + repaint, NOT rebuild
+      paint()
+   end
+   SetCursor(miniwin.cursor_hand)
+end
+function hs_grip_done (flags, id)
+   rebuild()      -- safe now: re-place hotspots at the new size
+   SaveState()
+end
+
+function pt_titlebar (flags, id)
+   if bit.band(flags, miniwin.hotspot_got_rh_mouse) == 0 then return end
+   local menu = "Bring to Front|Send to Back|Always on Top ("..(cfg.ontop and "on" or "off")..")|-|Search...|Clear filter|-|Hide"
+   local r = WindowMenu(win, WindowInfo(win,14), WindowInfo(win,15), menu)
+   if r == "Bring to Front" then CallPlugin(ZPLUG, "boostMe", win)
+   elseif r == "Send to Back" then CallPlugin(ZPLUG, "dropMe", win)
+   elseif r:find("Always on Top") then
+      cfg.ontop = not cfg.ontop
+      if cfg.ontop then CallPlugin(ZPLUG, "boostMe", win) end
+      SaveState()
+   elseif r == "Search..." then hs_search(flags, id)
+   elseif r == "Clear filter" then filter = ""; scroll = 0; rebuild()
+   elseif r == "Hide" then WindowShow(win, false)
+   end
+end
+
+------------------------------------------------------------------
+-- info + commands
+------------------------------------------------------------------
+function show_info (name)
+   local r = cfg.players[name:lower()]
+   if not r then ColourNote("silver","","No record for "..name); return end
+   ColourNote("cyan","","--- "..r.name.." ---")
+   ColourNote("white","","  Title : "..(r.title or "?"))
+   if r.ranks and r.ranks ~= "" then ColourNote("white","","  Ranks : "..r.ranks) end
+   ColourNote("white","","  Clan  : "..(r.clan ~= "" and (clan_full(r.clan).." ("..r.clan..")") or "none"))
+   ColourNote("white","","  Level : "..(r.info or "?"))
+   ColourNote(is_online(r) and "green" or "silver","","  Status: "..(is_online(r) and "online" or "offline").."  (seen "..ago(r.seen).." ago)")
+end
+
+local function do_find (term)
+   term = trim(term):lower()
+   if term == "" then ColourNote("silver","","Usage: pt find <text>"); return end
+   local hits = {}
+   for _, r in pairs(cfg.players) do
+      local hay = (r.name.." "..(r.title or "").." "..clan_full(r.clan)):lower()
+      if hay:find(term, 1, true) then hits[#hits+1] = r end
+   end
+   table.sort(hits, function(a,b) return (a.seen or 0) > (b.seen or 0) end)
+   ColourNote("cyan","", #hits.." match"..(#hits==1 and "" or "es").." for '"..term.."':")
+   for _, r in ipairs(hits) do
+      ColourNote(is_online(r) and "green" or "silver","",
+         string.format("  %-14s %-24s %s ago", r.name, clan_full(r.clan), ago(r.seen)))
+   end
+end
+
+local function do_export ()
+   local path = GetInfo(66) .. "players.csv"
+   local f = io.open(path, "w")
+   if not f then ColourNote("red","","Can't write "..path); return end
+   f:write("name,clan,ranks,level,online,last_seen_epoch,title\n")
+   for _, r in pairs(cfg.players) do
+      f:write(string.format('%s,%s,%s,%s,%s,%d,"%s"\n',
+         r.name, r.clan or "", (r.ranks or ""):gsub(",",";"), (r.info or ""):gsub(",",";"),
+         tostring(is_online(r)), r.seen or 0, (r.title or ""):gsub('"',"'")))
+   end
+   f:close()
+   ColourNote("green","","Exported "..count_seen().." players -> "..path)
+end
+
+function pt_cmd (arg)
+   arg = trim(arg or "")
+   local cmd, rest = arg:match("^(%S+)%s*(.*)$")
+   cmd = (cmd or ""):lower()
+   if cmd == "" then
+      if WindowInfo(win, 5) then WindowShow(win, false) else WindowShow(win, true); rebuild() end
+   elseif cmd == "find" then do_find(rest)
+   elseif cmd == "info" then show_info(trim(rest))
+   elseif cmd == "online" then
+      build_view()
+      ColourNote("cyan","","Online now ("..count_online().."):")
+      for _, r in ipairs(view) do
+         if is_online(r) then ColourNote("green","","  "..r.name.."  ("..clan_full(r.clan)..")") end
+      end
+   elseif cmd == "count" then
+      ColourNote("cyan","", count_seen().." tracked, "..count_online().." online, avg "..avg_online().." a time.")
+   elseif cmd == "export" then do_export()
+   elseif cmd == "clear" then
+      if rest == "yes" then cfg.players = {}; scroll = 0; rebuild(); SaveState(); ColourNote("green","","Database cleared.")
+      else ColourNote("silver","","Wipes ALL tracked players. Type: pt clear yes") end
+   else pt_help() end
+end
+
+function pt_help ()
+   ColourNote("cyan","", TITLE.." v"..PVER)
+   for _, l in ipairs({
+      "  pt               - show/hide the window",
+      "  pt find <text>   - search name / clan / title",
+      "  pt info <name>   - full record for one player",
+      "  pt online        - list who's online now",
+      "  pt count         - quick totals",
+      "  pt export        - dump players.csv",
+      "  pt clear yes     - wipe the database",
+      "  pt help          - this",
+      "Window: click a name for info, click the search bar to filter,",
+      "wheel to scroll, drag the grip to resize, right-click title for",
+      "Front / Back / Always-on-Top. Online is live for your own clan;",
+      "others show as online for a while after the last 'who'.",
+   }) do ColourNote("white","", l) end
+end
+
+------------------------------------------------------------------
+-- lifecycle
+------------------------------------------------------------------
+function OnPluginInstall ()
+   cfg = defaults()
+   local blob = GetVariable("cfg")
+   if blob then
+      local ok = pcall(function() assert(loadstring(blob))() end)
+      if ok and saved then
+         for k, v in pairs(saved) do cfg[k] = v end
+         cfg.players = cfg.players or {}
+         cfg.avg = cfg.avg or { sum = 0, n = 0 }
+      end
+   end
+
+   windowinfo = movewindow.install(win, miniwin.pos_top_left,
+      miniwin.create_absolute_location, false, nil,
+      { mouseup = pt_titlebar }, { x = 10, y = 120 })
+   WindowCreate(win, windowinfo.window_left, windowinfo.window_top, cfg.width, cfg.height,
+      windowinfo.window_mode, windowinfo.window_flags, COL.bg)
+
+   WindowFont(win, FONT, cfg.font, cfg.size)
+   fh = WindowFontInfo(win, FONT, 1)
+   if not fh or fh == 0 then
+      WindowFont(win, FONT, "Courier New", cfg.size)
+      fh = WindowFontInfo(win, FONT, 1) or 14
+   end
+
+   rebuild()
+   WindowShow(win, true)
+   if cfg.ontop then CallPlugin(ZPLUG, "boostMe", win) end
+end
+
+function SaveState ()
+   SetVariable("cfg", "saved = "..serialize.save_simple(cfg))
+   if WindowInfo(win, 1) then movewindow.save_state(win) end
+end
+function OnPluginSaveState () SaveState() end
+
+function OnPluginClose ()
+   WindowShow(win, false)
+   WindowDelete(win)
+end
+function OnPluginEnable () WindowShow(win, true); rebuild() end
+function OnPluginDisable () WindowShow(win, false) end
+]]>
+</script>
+</muclient>

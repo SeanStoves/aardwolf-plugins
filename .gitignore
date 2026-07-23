@@ -7,3 +7,6 @@ maps/
 map_*.svg
 map_*.md
 map_*.json
+
+# Player Tracker export (generated player data)
+players.csv
