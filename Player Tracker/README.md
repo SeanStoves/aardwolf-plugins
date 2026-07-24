@@ -28,12 +28,23 @@ that's what drives the live dot for clanmates (Boot's `is in attendance` /
 `has had enough of learning` notices). Everyone else is marked online for a while
 after the last time a `who` saw them, then decays to offline.
 
+## The window
+
+The list shows **who's online right now**, scrollable, newest sighting first. A
+search is how you reach the rest of the database — while a filter is active it
+matches against every player ever seen, online or not, so offline hits show with
+a grey dot. Clear the filter and you're back to the online list.
+
+The footer carries a **last-updated stamp** — the clock time of the last `who`
+that landed and how long ago that was. If it's going stale, nothing is feeding
+it.
+
 ## Use
 
 - **`pt`** — show/hide the window (defaults to on top).
-- **Click a name** — prints that player's full record.
-- **Click the search bar** — filter the list by name, clan or title (click the
-  `x` to clear).
+- **Click a name** — runs `pt info <name>` for that player.
+- **Click the search bar** — filter by name, clan or title (click the `x` to
+  clear).
 - **Mouse-wheel** — scroll the list.
 - **Drag the bottom-right grip** — resize.
 - **Right-click the title bar** — Bring to Front / Send to Back / toggle Always

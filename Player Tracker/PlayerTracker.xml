@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.2"
+   version="2.3"
 >
 </plugin>
 
@@ -87,6 +87,7 @@ local function defaults ()
       ontop = true,
       players = {},               -- name:lower -> rec
       avg = { sum = 0, n = 0 },   -- rolling online average
+      last_who = 0,               -- when the last who finished (footer stamp)
    }
 end
 local cfg = defaults()
@@ -217,6 +218,7 @@ end
 
 function who_done (n)
    capturing = false
+   cfg.last_who = os.time()
    if n and n > 0 then cfg.avg.sum = cfg.avg.sum + n; cfg.avg.n = cfg.avg.n + 1 end
    rebuild()
    SaveState()
@@ -243,12 +245,20 @@ local function count_seen () local n=0; for _ in pairs(cfg.players) do n=n+1 end
 local function count_online () local n=0; for _,r in pairs(cfg.players) do if is_online(r) then n=n+1 end end; return n end
 local function avg_online () if cfg.avg.n == 0 then return 0 end; return math.floor(cfg.avg.sum/cfg.avg.n + 0.5) end
 
+-- the list shows who's on right now. A search is the way to reach the rest of the
+-- database, so a live filter looks at everyone, online or not.
 local function build_view ()
    view = {}
    local f = filter:lower()
    for _, r in pairs(cfg.players) do
-      local hay = (r.name.." "..(r.title or "").." "..clan_full(r.clan)):lower()
-      if f == "" or hay:find(f, 1, true) then view[#view+1] = r end
+      local show
+      if f == "" then
+         show = is_online(r)
+      else
+         local hay = (r.name.." "..(r.title or "").." "..clan_full(r.clan)):lower()
+         show = hay:find(f, 1, true) ~= nil
+      end
+      if show then view[#view+1] = r end
    end
    table.sort(view, function (a, b)
       local ao, bo = is_online(a), is_online(b)
@@ -266,7 +276,10 @@ local function stats_top () return title_h() + PAD end
 local function search_top () return stats_top() + fh*2 + 2 end
 local function list_top () return search_top() + fh + PAD + 6 end
 local function row_h () return fh + 2 end
-local function vis_rows () return math.max(0, math.floor((cfg.height - list_top() - PAD) / row_h())) end
+local function footer_h () return fh + 3 end   -- last-updated stamp along the bottom
+local function vis_rows ()
+   return math.max(0, math.floor((cfg.height - list_top() - footer_h() - PAD) / row_h()))
+end
 
 ------------------------------------------------------------------
 -- colors (0xBBGGRR) + paint
@@ -306,7 +319,9 @@ function paint ()
 
    local ly, rows = list_top(), vis_rows()
    if #view == 0 then
-      txt(PAD, ly, filter ~= "" and "No matches." or "No players yet -- type 'who'.", COL.dim)
+      local empty = "No one online -- type 'who'."
+      if filter ~= "" then empty = "No matches." end
+      txt(PAD, ly, empty, COL.dim)
    else
       local first = scroll + 1
       for i = 0, rows - 1 do
@@ -321,11 +336,20 @@ function paint ()
          if r.clan and r.clan ~= "" then txt(nx + nw + 6, ry, "("..r.clan..")", COL.accent) end
          txt(cfg.width - PAD, ry, ago(r.seen), COL.dim, true)
       end
-      if #view > rows then
-         local more = #view - (scroll + rows)
-         if more > 0 then txt(cfg.width - PAD, cfg.height - fh, "+"..more.." more", COL.dim, true) end
-      end
    end
+
+   -- footer: when the last who landed, plus how far down the list you are
+   local fy = cfg.height - footer_h()
+   WindowLine(win, PAD, fy - 2, cfg.width - PAD, fy - 2, COL.box, 0, 1)
+   local stamp
+   if (cfg.last_who or 0) > 0 then
+      stamp = "Updated "..os.date("%H:%M:%S", cfg.last_who).." ("..ago(cfg.last_who).." ago)"
+   else
+      stamp = "Never updated"
+   end
+   txt(PAD, fy, stamp, COL.dim)
+   local more = #view - (scroll + rows)
+   if more > 0 then txt(cfg.width - PAD, fy, "+"..more, COL.dim, true) end
 
    -- resize grip
    WindowLine(win, cfg.width-9, cfg.height-3, cfg.width-3, cfg.height-9, COL.dim, 0, 1)
@@ -383,7 +407,7 @@ end
 function hs_row (flags, id)
    local n = tonumber(id:match("row_(%d+)"))
    local r = n and view[n]
-   if r then show_info(r.name) end
+   if r then Execute("pt info " .. r.name) end
 end
 
 function hs_search (flags, id)
