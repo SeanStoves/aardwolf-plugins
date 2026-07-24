@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-07-19 23:00:00"
    requires="5.07"
-   version="1.2"
+   version="1.3"
 >
 <description trim="y">
 <![CDATA[
@@ -25,7 +25,8 @@ scroll back. Type 'infowin' to show/hide.
 <include name="constants.lua"/>
 
 <aliases>
-  <alias match="^infowin$" regexp="y" enabled="y" ignore_case="y" script="toggle" sequence="100"></alias>
+  <alias match="^infowin(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y"
+     send_to="12" sequence="100"><send>iw_cmd("%1")</send></alias>
 </aliases>
 
 <triggers>
@@ -58,7 +59,6 @@ local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
 local cfg
 local lines   = {}      -- buffer: each entry = list of {text, colour}
 local scroll  = 0       -- lines scrolled up from the bottom
-local MAXBUF  = 500
 local drag_x0, drag_y0, drag_w0, drag_h0
 
 local COL = {
@@ -68,7 +68,15 @@ local COL = {
 }
 local PAD = 5
 
-local function defaults () return { x=nil, y=nil, w=420, h=200, font="Lucida Console", size=9 } end
+local function defaults () return { x=nil, y=nil, w=420, h=200, font="Lucida Console", size=9, buffer=100 } end
+
+-- how many INFO lines to keep for scrollback ('infowin buffer <n>')
+local function maxbuf () return cfg.buffer or 100 end
+
+-- drop the oldest lines when the buffer shrinks or overflows
+local function trim_buffer ()
+   while #lines > maxbuf() do table.remove(lines, 1) end
+end
 
 local function fh () return WindowFontInfo(win, "f", 1) or 12 end
 local function title_h () return fh() + PAD end
@@ -117,7 +125,7 @@ function capture (name, line, wildcards, styles)
    for _, s in ipairs(styles or {}) do runs[#runs+1] = { text = s.text, colour = s.textcolour } end
    if #runs == 0 then runs = {{ text = line, colour = COL.deftext }} end
    lines[#lines+1] = runs
-   if #lines > MAXBUF then table.remove(lines, 1) end
+   trim_buffer()
    if scroll > 0 then scroll = math.min(maxscroll(), scroll + 1) end   -- hold view if scrolled up
    EnableTriggerGroup("end_gag", true)   -- gag the trailing blank Aardwolf pads INFO with
    paint()
@@ -176,6 +184,51 @@ function toggle ()
 end
 
 ----------------------------------------------------------------------
+-- commands
+----------------------------------------------------------------------
+function iw_cmd (arg)
+   arg = (arg or ""):gsub("^%s+",""):gsub("%s+$","")
+   local verb, rest = arg:match("^(%S+)%s*(.*)$")
+   verb = (verb or ""):lower()
+
+   if verb == "" then toggle()
+
+   elseif verb == "buffer" then
+      local n = tonumber(rest)
+      if not n then
+         ColourNote("cyan","", TITLE.." buffer: "..maxbuf().." lines ("..#lines.." held)")
+      elseif n < 10 or n > 5000 then
+         ColourNote("orange","", "Buffer must be 10-5000 lines.")
+      else
+         cfg.buffer = math.floor(n)
+         trim_buffer()
+         if scroll > maxscroll() then scroll = maxscroll() end
+         paint(); SaveState()
+         ColourNote("green","", TITLE.." buffer: "..maxbuf().." lines.")
+      end
+
+   elseif verb == "clear" then
+      lines = {}; scroll = 0; paint()
+      ColourNote("green","", TITLE.." cleared.")
+
+   elseif verb == "show" then WindowShow(win, true); paint()
+   elseif verb == "hide" then WindowShow(win, false)
+
+   else
+      ColourNote("cyan","", TITLE.." Window v"..PVER)
+      for _, l in ipairs({
+         "  infowin             - show/hide the window",
+         "  infowin buffer <n>  - scrollback lines to keep (10-5000, default 100)",
+         "  infowin buffer      - show the current setting",
+         "  infowin clear       - empty the buffer",
+         "  infowin show | hide - force it open/closed",
+         "Drag the title bar to move, the bottom-right grip to resize, mouse-wheel",
+         "to scroll. Right-click the title bar for Front / Back / Hide / Clear.",
+      }) do ColourNote("white","", l) end
+   end
+end
+
+----------------------------------------------------------------------
 -- lifecycle
 ----------------------------------------------------------------------
 function OnPluginInstall ()
@@ -195,10 +248,11 @@ function OnPluginInstall ()
    WindowShow(win, true)
 end
 
-function OnPluginSaveState ()
+function SaveState ()
    SetVariable("cfg", "saved = "..serialize.save_simple(cfg))
    if WindowInfo(win, 1) then movewindow.save_state(win) end
 end
+function OnPluginSaveState () SaveState() end
 
 function OnPluginClose () WindowShow(win, false); WindowDelete(win) end
 ]]>

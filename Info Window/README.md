@@ -14,10 +14,18 @@ output.
 - **`infowin`** — show/hide the window.
 - **Drag** the title bar to move (position remembered).
 - **Drag the bottom-right grip** to resize.
-- **Mouse-wheel** to scroll back (last 500 lines).
+- **Mouse-wheel** to scroll back through the buffer.
 - **Right-click** the title bar → Bring to Front / Send to Back / Hide / Clear.
 
-Size and position persist across sessions.
+| command | what |
+|---|---|
+| `infowin` | show/hide the window |
+| `infowin buffer <n>` | scrollback lines to keep (10–5000, default 100) |
+| `infowin buffer` | show the current setting and how many are held |
+| `infowin clear` | empty the buffer |
+| `infowin show` / `infowin hide` | force it open/closed |
+
+Size, position and buffer length persist across sessions.
 
 ## Notes
 
