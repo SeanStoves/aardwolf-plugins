@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.3"
+   version="2.4"
 >
 </plugin>
 
@@ -209,7 +209,9 @@ function on_who (line)
    r.name  = p.name
    r.title = p.title
    if p.ranks ~= "" then r.ranks = p.ranks end
-   if p.clan  ~= "" then r.clan  = p.clan  end
+   -- keep a clan we already know if this row didn't show one, but never leave the
+   -- field nil -- unclanned players would otherwise have no clan key at all
+   r.clan = (p.clan ~= "" and p.clan) or r.clan or ""
    r.info = p.info
    r.seen = os.time()
    r.on   = true
@@ -228,6 +230,7 @@ function clan_login (name)
    local key = name:lower()
    local r = cfg.players[key] or { name = name }
    r.name = r.name or name
+   r.clan = r.clan or ""
    r.on, r.seen = true, os.time()
    cfg.players[key] = r
    rebuild()
@@ -372,14 +375,13 @@ function rebuild ()
    WindowAddHotspot(win, "search", PAD, sy, cfg.width - PAD, sy + fh + 2,
       "", "", "hs_search", "", "", "click to search", miniwin.cursor_hand, 0)
 
-   -- rows
+   -- rows. The id is the visible SLOT, not the index into view -- that way
+   -- scrolling is a repaint and never has to touch hotspots (deleting them from
+   -- inside the wheel handler is what kills the scroll).
    local ly, rows = list_top(), vis_rows()
-   local first = scroll + 1
-   for i = 0, rows - 1 do
-      local r = view[first + i]
-      if not r then break end
-      local ry = ly + i * row_h()
-      local id = "row_" .. (first + i)
+   for i = 1, rows do
+      local ry = ly + (i - 1) * row_h()
+      local id = "row_" .. i
       WindowAddHotspot(win, id, PAD, ry, cfg.width - PAD, ry + row_h(),
          "", "", "hs_row", "", "", "click for info", miniwin.cursor_hand, 0)
       WindowScrollwheelHandler(win, id, "hs_wheel")
@@ -405,8 +407,8 @@ end
 -- hotspot handlers
 ------------------------------------------------------------------
 function hs_row (flags, id)
-   local n = tonumber(id:match("row_(%d+)"))
-   local r = n and view[n]
+   local slot = tonumber(id:match("row_(%d+)"))
+   local r = slot and view[scroll + slot]
    if r then Execute("pt info " .. r.name) end
 end
 
@@ -419,10 +421,12 @@ function hs_search (flags, id)
 end
 
 function hs_wheel (flags, id)
-   local dir = (bit.band(flags, 0x100) ~= 0) and 1 or -1
+   local dir = (bit.band(flags, 0x100) ~= 0) and 3 or -3
    local maxs = math.max(0, #view - vis_rows())
-   scroll = math.max(0, math.min(maxs, scroll + dir))
-   rebuild()
+   local ns = math.max(0, math.min(maxs, scroll + dir))
+   -- repaint only. rebuild() here would WindowDeleteAllHotspots the hotspot this
+   -- handler is running on, and the scroll dies with it.
+   if ns ~= scroll then scroll = ns; paint() end
 end
 
 function hs_grip_down (flags, id)
@@ -469,7 +473,8 @@ function show_info (name)
    ColourNote("cyan","","--- "..r.name.." ---")
    ColourNote("white","","  Title : "..(r.title or "?"))
    if r.ranks and r.ranks ~= "" then ColourNote("white","","  Ranks : "..r.ranks) end
-   ColourNote("white","","  Clan  : "..(r.clan ~= "" and (clan_full(r.clan).." ("..r.clan..")") or "none"))
+   local c = r.clan or ""    -- unclanned players have no clan field at all
+   ColourNote("white","","  Clan  : "..(c ~= "" and (clan_full(c).." ("..c..")") or "none"))
    ColourNote("white","","  Level : "..(r.info or "?"))
    ColourNote(is_online(r) and "green" or "silver","","  Status: "..(is_online(r) and "online" or "offline").."  (seen "..ago(r.seen).." ago)")
 end
