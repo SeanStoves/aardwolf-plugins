@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.4"
+   version="2.5"
 >
 </plugin>
 
@@ -337,7 +337,6 @@ function paint ()
          local nx = PAD + 13
          local nw = txt(nx, ry, r.name, on and COL.text or COL.dim)
          if r.clan and r.clan ~= "" then txt(nx + nw + 6, ry, "("..r.clan..")", COL.accent) end
-         txt(cfg.width - PAD, ry, ago(r.seen), COL.dim, true)
       end
    end
 
@@ -346,7 +345,7 @@ function paint ()
    WindowLine(win, PAD, fy - 2, cfg.width - PAD, fy - 2, COL.box, 0, 1)
    local stamp
    if (cfg.last_who or 0) > 0 then
-      stamp = "Updated "..os.date("%H:%M:%S", cfg.last_who).." ("..ago(cfg.last_who).." ago)"
+      stamp = "Updated "..os.date("%H:%M:%S", cfg.last_who)
    else
       stamp = "Never updated"
    end
