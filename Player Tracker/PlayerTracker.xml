@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.5"
+   version="2.6"
 >
 </plugin>
 
@@ -476,6 +476,14 @@ function show_info (name)
    ColourNote("white","","  Clan  : "..(c ~= "" and (clan_full(c).." ("..c..")") or "none"))
    ColourNote("white","","  Level : "..(r.info or "?"))
    ColourNote(is_online(r) and "green" or "silver","","  Status: "..(is_online(r) and "online" or "offline").."  (seen "..ago(r.seen).." ago)")
+end
+
+-- machine-readable lookup for other plugins (CallPlugin).
+-- returns "1|<Name>|<seen_epoch>|<online 0/1>" when known, "0|<name>" when not.
+function pt_lookup (name)
+   local r = cfg.players[(name or ""):lower()]
+   if not r then return "0|" .. (name or "") end
+   return "1|" .. r.name .. "|" .. tostring(r.seen or 0) .. "|" .. (is_online(r) and "1" or "0")
 end
 
 local function do_find (term)
