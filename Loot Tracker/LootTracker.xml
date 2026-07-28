@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="2.9"
+   version="3.0"
 >
 </plugin>
 
@@ -554,6 +554,10 @@ end
 
 -- register this character with the pool; the API returns a key we store hidden
 local function do_auth ()
+   if auth_key() ~= "" then
+      ColourNote("green","", TITLE..": already authenticated as "..(GetVariable("authname") or "?")..".")
+      return
+   end
    if not need_api() then return end
    local name = trim(gmcp("char.base.name") or "")
    if name == "" then name = trim(utils.inputbox("Character name to register with the loot pool:", TITLE, "") or "") end
