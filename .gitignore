@@ -10,3 +10,10 @@ map_*.json
 
 # Player Tracker export (generated player data)
 players.csv
+
+# Loot Tracker database (generated; normally lives in the world-files dir, but
+# never track it if it lands here)
+SolaoLoot.db
+*.db
+*.db-journal
+*.db-wal
