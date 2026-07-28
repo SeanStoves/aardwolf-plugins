@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="2.8"
+   version="2.9"
 >
 </plugin>
 
@@ -101,6 +101,9 @@ pcall(function () async = require "async" end)        -- global; async HTTP for 
 
 local TITLE = "Loot Tracker"
 local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+
+-- shared loot-pool service. Baked in, not user-changeable.
+local API_URL = "https://api.aardwolf.muds.fyi"
 
 local DBFILE
 local db
@@ -536,11 +539,11 @@ end
 --   GET  <api>/loot   x-api-key                 -> JSON pooled dump
 -- (JSON body shape: { loot=[{col:val,..},..], shop_stock=[..], gathered=[..], targets=[..] })
 ------------------------------------------------------------------
-local function api_url ()  return trim(GetVariable("api") or "") end
+local function api_url ()  return API_URL end
 local function auth_key () return trim(GetVariable("authkey") or "") end
 
 local function need_api ()
-   if api_url() == "" then ColourNote("orange","", TITLE..": no API set -- 'loot api <url>' first."); return false end
+   if api_url() == "" then ColourNote("orange","", TITLE..": sharing is disabled in this build."); return false end
    if not async then ColourNote("red","", TITLE..": async library missing; can't reach the API."); return false end
    return true
 end
@@ -631,12 +634,8 @@ function lt_cmd (arg)
    elseif verb == "upload" then do_upload()
    elseif verb == "update" then do_update()
    elseif verb == "api" then
-      if rest ~= "" then SetVariable("api", trim(rest)); ColourNote("green","", TITLE..": API = "..trim(rest))
-      else
-         ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(off)"))
-         ColourNote("white","", "  auth  : "..(auth_key() ~= "" and ("yes, as "..(GetVariable("authname") or "?")) or "no -- run 'loot auth'"))
-         ColourNote("silver","","loot api <url>   (blank = off)")
-      end
+      ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(disabled in this build)"))
+      ColourNote("white","", "  auth  : "..(auth_key() ~= "" and ("yes, as "..(GetVariable("authname") or "?")) or "no -- run 'loot auth'"))
 
    elseif verb == "clear" then
       if rest == "loot" then db:exec("DELETE FROM loot;"); ColourNote("green","","Loot table cleared.")
@@ -660,7 +659,7 @@ function lt_cmd (arg)
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",
-         "  loot api <url>     - set the shared-API endpoint (blank = off / status)",
+         "  loot api           - show the shared-API endpoint + your auth status",
          "  loot auth          - register this character with the pool (one time)",
          "  loot upload        - push your DB to the shared pool (needs auth)",
          "  loot update        - pull + merge the shared pool (needs auth)",

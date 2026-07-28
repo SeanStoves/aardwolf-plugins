@@ -62,18 +62,19 @@ rows kept — and neither sends anything over a game channel.
 
 Pass the file around out-of-band (Discord, git, a shared drive).
 
-**Shared API (online, default off):**
+**Shared API (online):**
 
-- `loot api <url>` — point at a running loot-pool service (blank = off; run with
-  no argument to see the endpoint + auth status).
+The endpoint is built into the plugin (not user-settable). `loot api` shows it
+and your auth status.
+
 - `loot auth` — register this character once. Sends your GMCP character name (or
   asks for one), the service returns an auth key, and the plugin stores it
   **hidden** — you never see or handle the key.
 - `loot upload` — push your DB into the shared pool (needs auth).
 - `loot update` — pull the pooled data down and merge it (needs auth).
 
-Nothing contacts the API until you set a URL and authenticate, so it's off by
-default. The service itself is a separate project.
+Nothing contacts the API until you run `loot auth`, so it stays quiet until you
+opt in. The service itself is a separate project.
 
 Database: `SolaoLoot.db` in the world-files directory. Window-less — it's capture
 triggers plus a SQLite DB and the `loot` query commands.
