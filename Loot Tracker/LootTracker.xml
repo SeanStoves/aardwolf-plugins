@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="2.4"
+   version="2.5"
 >
 </plugin>
 
@@ -529,36 +529,68 @@ local function do_import (fn)
 end
 
 ------------------------------------------------------------------
--- shared API service (default off): upload pushes your DB, update pulls the pool.
--- No game traffic -- straight HTTP. Set the endpoint with 'loot api <url>'.
+-- shared API service (default off). 'loot api <url>' sets the endpoint, then
+-- 'loot auth' registers this character and stores the key (never shown). upload
+-- pushes your DB; update pulls + merges the pool. Straight HTTP, no game traffic.
+--   POST <api>/auth   body = char name        -> returns the auth key
+--   POST <api>/loot   x-api-key, body = dump   -> server merges it in
+--   GET  <api>/loot   x-api-key                -> returns the pooled dump
 ------------------------------------------------------------------
-local function api_url () return trim(GetVariable("api") or "") end
-local function api_key () return trim(GetVariable("apikey") or "") end
+local function api_url ()  return trim(GetVariable("api") or "") end
+local function auth_key () return trim(GetVariable("authkey") or "") end
+
+local function need_api ()
+   if api_url() == "" then ColourNote("orange","", TITLE..": no API set -- 'loot api <url>' first."); return false end
+   if not async then ColourNote("red","", TITLE..": async library missing; can't reach the API."); return false end
+   return true
+end
+local function need_auth ()
+   if auth_key() == "" then ColourNote("orange","", TITLE..": not authenticated -- run 'loot auth' first."); return false end
+   return true
+end
+
+-- register this character with the pool; the API returns a key we store hidden
+local function do_auth ()
+   if not need_api() then return end
+   local name = trim(gmcp("char.base.name") or "")
+   if name == "" then name = trim(utils.inputbox("Character name to register with the loot pool:", TITLE, "") or "") end
+   if name == "" then ColourNote("silver","", TITLE..": auth cancelled."); return end
+   local req = { method = "POST", source = name,
+      headers = { ["content-type"] = "text/plain", ["content-length"] = tostring(#name) } }
+   ColourNote("silver","", TITLE..": registering '"..name.."'...")
+   async.doAsyncRemoteRequest(api_url().."/auth", function (rc, page, status)
+      if status == 200 and type(page) == "string" and trim(page) ~= "" then
+         SetVariable("authkey", trim(page))       -- kept in plugin state, never displayed
+         SetVariable("authname", name)
+         ColourNote("green","", TITLE..": authenticated as "..name..". 'loot upload' / 'loot update' are ready.")
+      else
+         ColourNote("orange","", TITLE..": auth failed (status "..tostring(status)..").")
+      end
+   end, nil, 30, nil, req)
+end
 
 local function do_upload ()
-   local url = api_url()
-   if url == "" then ColourNote("orange","", TITLE..": no API set -- 'loot api <url>' first."); return end
-   if not async then ColourNote("red","", TITLE..": async library missing; can't reach the API."); return end
+   if not (need_api() and need_auth()) then return end
    local body = serialize_db()
    local req = { method = "POST", source = body,
-      headers = { ["content-type"] = "text/plain", ["content-length"] = tostring(#body), ["x-api-key"] = api_key() } }
+      headers = { ["content-type"] = "text/plain", ["content-length"] = tostring(#body), ["x-api-key"] = auth_key() } }
    ColourNote("silver","", TITLE..": uploading "..#body.." bytes...")
-   async.doAsyncRemoteRequest(url, function (rc, page, status)
+   async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
       if status == 200 then ColourNote("green","", TITLE..": upload ok."..(page and page ~= "" and ("  "..page) or ""))
+      elseif status == 401 or status == 403 then ColourNote("orange","", TITLE..": auth rejected -- run 'loot auth' again.")
       else ColourNote("orange","", TITLE..": upload failed (status "..tostring(status)..").") end
    end, nil, 30, nil, req)
 end
 
 local function do_update ()
-   local url = api_url()
-   if url == "" then ColourNote("orange","", TITLE..": no API set -- 'loot api <url>' first."); return end
-   if not async then ColourNote("red","", TITLE..": async library missing; can't reach the API."); return end
-   local req = { method = "GET", headers = { ["x-api-key"] = api_key() } }
-   ColourNote("silver","", TITLE..": fetching shared data...")
-   async.doAsyncRemoteRequest(url, function (rc, page, status)
+   if not (need_api() and need_auth()) then return end
+   local req = { method = "GET", headers = { ["x-api-key"] = auth_key() } }
+   ColourNote("silver","", TITLE..": fetching the shared pool...")
+   async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
       if status == 200 and type(page) == "string" then
          local added, seen = merge_dump(page)
          ColourNote("green","", TITLE..": update ok -- "..added.." new row(s) ("..seen.." read).")
+      elseif status == 401 or status == 403 then ColourNote("orange","", TITLE..": auth rejected -- run 'loot auth' again.")
       else ColourNote("orange","", TITLE..": update failed (status "..tostring(status)..").") end
    end, nil, 30, nil, req)
 end
@@ -592,14 +624,16 @@ function lt_cmd (arg)
    elseif verb == "recent" then show_recent()
    elseif verb == "export" then do_export(rest)
    elseif verb == "import" then do_import(rest)
+   elseif verb == "auth" then do_auth()
    elseif verb == "upload" then do_upload()
    elseif verb == "update" then do_update()
    elseif verb == "api" then
       if rest ~= "" then SetVariable("api", trim(rest)); ColourNote("green","", TITLE..": API = "..trim(rest))
-      else ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(off)")); ColourNote("silver","","loot api <url>   (blank shown = off)") end
-   elseif verb == "apikey" then
-      if rest ~= "" then SetVariable("apikey", trim(rest)); ColourNote("green","", TITLE..": API key set.")
-      else ColourNote("silver","","Usage: loot apikey <key>") end
+      else
+         ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(off)"))
+         ColourNote("white","", "  auth  : "..(auth_key() ~= "" and ("yes, as "..(GetVariable("authname") or "?")) or "no -- run 'loot auth'"))
+         ColourNote("silver","","loot api <url>   (blank = off)")
+      end
 
    elseif verb == "clear" then
       if rest == "loot" then db:exec("DELETE FROM loot;"); ColourNote("green","","Loot table cleared.")
@@ -623,9 +657,10 @@ function lt_cmd (arg)
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",
-         "  loot api <url>     - shared-API endpoint (blank = off); loot apikey <key>",
-         "  loot upload        - push your DB to the shared API",
-         "  loot update        - pull + merge the shared pool from the API",
+         "  loot api <url>     - set the shared-API endpoint (blank = off / status)",
+         "  loot auth          - register this character with the pool (one time)",
+         "  loot upload        - push your DB to the shared pool (needs auth)",
+         "  loot update        - pull + merge the shared pool (needs auth)",
          "  loot clear loot|shop|gathered|goals - wipe a table",
          "  loot help          - this",
          "Records every item you loot off a corpse, and native shop stock ('---'",

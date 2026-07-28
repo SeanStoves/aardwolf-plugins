@@ -50,5 +50,30 @@ comes straight from your own loots via GMCP, so it stands alone.
 | `loot clear loot\|shop\|gathered\|goals` | wipe a table |
 | `loot help` | command list |
 
+## Sharing (pool data with your clan)
+
+Both paths merge the same way as the local capture — new rows added, existing
+rows kept — and neither sends anything over a game channel.
+
+**Files (offline):**
+
+- `loot export [file]` — dump the whole DB to a text file.
+- `loot import <file>` — merge someone else's export.
+
+Pass the file around out-of-band (Discord, git, a shared drive).
+
+**Shared API (online, default off):**
+
+- `loot api <url>` — point at a running loot-pool service (blank = off; run with
+  no argument to see the endpoint + auth status).
+- `loot auth` — register this character once. Sends your GMCP character name (or
+  asks for one), the service returns an auth key, and the plugin stores it
+  **hidden** — you never see or handle the key.
+- `loot upload` — push your DB into the shared pool (needs auth).
+- `loot update` — pull the pooled data down and merge it (needs auth).
+
+Nothing contacts the API until you set a URL and authenticate, so it's off by
+default. The service itself is a separate project.
+
 Database: `SolaoLoot.db` in the world-files directory. Window-less — it's capture
 triggers plus a SQLite DB and the `loot` query commands.
