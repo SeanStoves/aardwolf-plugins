@@ -27,6 +27,10 @@ depends on the folder a plugin lives in.
   `who` sees: one record per player with clan, ranks, level, title and last-seen,
   in a searchable miniwindow. Clickable names, a search bar, seen/online/avg
   stats, and live online/offline for your own clan.
+- **[Loot Tracker](Loot%20Tracker/README.md)** — a searchable SQLite database of
+  where things come from: mob loot, room resources, shop stock, campaign goals —
+  captured automatically as you play, each stamped with the GMCP room. Stands
+  alone (no mapper or S&D needed); `loot item/mob/shop/...` to query.
 
 ## License
 

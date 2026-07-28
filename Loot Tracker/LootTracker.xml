@@ -1,0 +1,529 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Solao_Loot_Tracker"
+   author="Solao"
+   id="2bfad551215b67340f3d9d27"
+   language="Lua"
+   purpose="Records mob loot (item, mob, zone, room) into a searchable SQLite database"
+   requires="5.07"
+   save_state="y"
+   date_written="2026-07-23"
+   version="2.3"
+>
+</plugin>
+
+<!--
+ Loot Tracker: every time you loot an item off a corpse it records the item, the
+ mob it came from, and the zone/room you were in (from GMCP) into a SQLite DB.
+ SolaoBot queries this DB for 'solbot item <name>'. Shop-stock capture (native
+ store items) uses the shop_stock table, wired once the 'list' format is nailed.
+-->
+
+<triggers>
+  <!-- "You get <item> from the <adj> corpse of <mob>." Gold is filtered in script. -->
+  <trigger
+     enabled="y"
+     match="^You get (.+?) from the .*?corpse of (.+)\.$"
+     regexp="y"
+     script="on_loot"
+     sequence="100"
+  ></trigger>
+
+  <!-- shop 'list' native-stock row: num, level, price, Qty, item. A triple-dash in
+       the Qty column means unlimited (store always stocks it); limited/resold rows
+       show a number there and are skipped. Item may or may not carry a [Type] tag. -->
+  <trigger
+     enabled="y"
+     match="^\s*\d+\s+(\d+)\s+(\d+)\s+---\s+(\S.*?)\s*$"
+     regexp="y"
+     script="on_shop"
+     sequence="100"
+  ></trigger>
+
+  <!-- campaign/quest goal target: "You still have to kill * <mob> (<area>)".
+       Gives a goal-mob to area mapping that scan/loot data won't have. -->
+  <trigger
+     enabled="y"
+     match="^You still have to kill \* (.+?) \((.+)\)\s*$"
+     regexp="y"
+     send_to="12"
+     sequence="100"
+  ><send>on_target("%1", "%2")</send></trigger>
+
+  <!-- "You get <item> from <source>." room-resource gather. on_get skips corpses
+       (loot handles them) and personal containers (bags/pouches/etc). -->
+  <trigger
+     enabled="y"
+     match="^You get (.+?) from (.+)\.$"
+     regexp="y"
+     script="on_get"
+     sequence="110"
+  ></trigger>
+
+  <!-- invdata: learn which items you carry are containers (type 11), so gets from
+       your own bags are skipped no matter what you've renamed them to. -->
+  <trigger
+     enabled="y"
+     match="^\{invitem\}(.+)$"
+     regexp="y"
+     keep_evaluating="y"
+     script="on_invitem"
+     sequence="100"
+  ></trigger>
+
+  <!-- armed only during 'loot here': catches the "You get <item>." from the get it
+       sent, so the full item name + colour is recorded, not just what you typed. -->
+  <trigger
+     enabled="n"
+     name="here_catch"
+     match="^You get (.+?)\.$"
+     regexp="y"
+     keep_evaluating="y"
+     script="on_here_catch"
+     sequence="90"
+  ></trigger>
+</triggers>
+
+<aliases>
+  <alias match="^loot(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y" send_to="12"><send>lt_cmd("%1")</send></alias>
+</aliases>
+
+<include name="constants.lua"/>
+
+<script>
+<![CDATA[
+require "gmcphelper"
+local ok_colors = pcall(require, "aardwolf_colors")   -- StylesToColours
+
+local TITLE = "Loot Tracker"
+local PVER  = GetPluginInfo(GetPluginID(), 19) or "?"
+
+local DBFILE
+local db
+
+local function trim (s) return (s or ""):gsub("^%s+",""):gsub("%s+$","") end
+local function q (s) return "'" .. tostring(s or ""):gsub("'", "''") .. "'" end
+
+-- 'get from' can be a room resource (a bush, a chest) OR your own bag. We only
+-- want room resources, so any source containing one of these words is treated as
+-- a personal container and ignored. Editable with 'loot bags add|del'.
+local exclude = {}
+local EXCLUDE_DEFAULT = "bag,backpack,pouch,sack,satchel,purse,quiver,holding,pack,wallet,keyring"
+local function load_exclude ()
+   exclude = {}
+   for word in (GetVariable("bags") or EXCLUDE_DEFAULT):gmatch("[^,]+") do
+      local w = trim(word):lower()
+      if w ~= "" then exclude[w] = true end
+   end
+end
+local function save_exclude ()
+   local t = {}; for w in pairs(exclude) do t[#t+1] = w end
+   table.sort(t); SetVariable("bags", table.concat(t, ","))
+end
+local function is_bag (source)
+   local low = source:lower()
+   for w in pairs(exclude) do if low:find(w, 1, true) then return true end end
+   return false
+end
+
+-- the reliable check: your inventory containers, read live from invdata (rename-
+-- proof). {invitem}serial,flags,shortdesc,type... where type 11 == a container.
+-- my_bags[shortdesc:lower()] = true. A source you 'get from' that is one of these
+-- is your own bag; anything else is a room object.
+local my_bags = {}
+function on_invitem (name, line, wildcards)
+   local parts = {}
+   for p in (wildcards[1] .. ","):gmatch("(.-),") do parts[#parts+1] = p end
+   local n = #parts
+   if n < 7 then return end                       -- serial,flags,desc,level,type,+3 values
+   if tonumber(parts[n-3]) ~= 11 then return end  -- type field; 11 = container only
+   local d = {}
+   for i = 3, n - 5 do d[#d+1] = parts[i] end      -- desc may itself contain commas
+   local desc = trim(table.concat(d, ","))
+   if desc ~= "" then my_bags[desc:lower()] = true end
+end
+
+------------------------------------------------------------------
+-- database
+------------------------------------------------------------------
+local function opendb ()
+   db = sqlite3.open(DBFILE)
+   db:exec [[
+      CREATE TABLE IF NOT EXISTS loot (
+         item       TEXT NOT NULL,
+         item_color TEXT,
+         mob        TEXT NOT NULL,
+         zone       TEXT,
+         roomid     INTEGER,
+         room       TEXT,
+         count      INTEGER NOT NULL DEFAULT 1,
+         last_seen  INTEGER,
+         PRIMARY KEY (item, mob)
+      );
+      CREATE TABLE IF NOT EXISTS shop_stock (
+         item       TEXT NOT NULL,
+         item_color TEXT,
+         keeper     TEXT,
+         zone       TEXT,
+         roomid     INTEGER,
+         room       TEXT,
+         price      INTEGER,
+         level      INTEGER,
+         last_seen  INTEGER,
+         PRIMARY KEY (item, roomid)
+      );
+      CREATE TABLE IF NOT EXISTS targets (
+         mob       TEXT NOT NULL,
+         area      TEXT NOT NULL,
+         last_seen INTEGER,
+         PRIMARY KEY (mob, area)
+      );
+      CREATE TABLE IF NOT EXISTS gathered (
+         item       TEXT NOT NULL,
+         item_color TEXT,
+         source     TEXT NOT NULL,
+         zone       TEXT,
+         roomid     INTEGER,
+         room       TEXT,
+         count      INTEGER NOT NULL DEFAULT 1,
+         last_seen  INTEGER,
+         PRIMARY KEY (item, source, roomid)
+      );
+      CREATE INDEX IF NOT EXISTS idx_loot_item ON loot(item);
+      CREATE INDEX IF NOT EXISTS idx_loot_mob  ON loot(mob);
+      CREATE INDEX IF NOT EXISTS idx_shop_item ON shop_stock(item);
+      CREATE INDEX IF NOT EXISTS idx_targ_mob  ON targets(mob);
+      CREATE INDEX IF NOT EXISTS idx_gath_item ON gathered(item);
+   ]]
+   -- upgrade older DBs (each ALTER is a no-op-or-error if the column exists)
+   for _, a in ipairs({
+      "ALTER TABLE shop_stock ADD COLUMN level INTEGER;",
+      "ALTER TABLE loot ADD COLUMN item_color TEXT;",
+      "ALTER TABLE shop_stock ADD COLUMN item_color TEXT;",
+   }) do pcall(function () db:exec(a) end) end
+end
+
+-- pull the coloured (@-coded) run of the item out of a matched line's styles
+local function colored_from (styles, pat)
+   if not (ok_colors and StylesToColours) then return "" end
+   local ok, full = pcall(StylesToColours, styles)
+   if not ok or type(full) ~= "string" then return "" end
+   return trim(full:match(pat) or "")
+end
+
+-- current room from GMCP
+local function room_now ()
+   return trim(gmcp("room.info.zone") or ""),
+          tonumber(gmcp("room.info.num")) or 0,
+          trim(gmcp("room.info.name") or "")
+end
+
+------------------------------------------------------------------
+-- capture
+------------------------------------------------------------------
+function on_loot (name, line, wildcards, styles)
+   local item, mob = trim(wildcards[1]), trim(wildcards[2])
+   if item:match("^[%d,]+ gold coins?$") then return end     -- gold isn't loot (commas too)
+   if item == "" or mob == "" then return end
+   -- mob short-descs always lead with an article (a/an/the); player corpses are a
+   -- bare name. No article == a player corpse -> don't record PK loot.
+   local low = mob:lower()
+   if not (low:match("^a ") or low:match("^an ") or low:match("^the ")) then return end
+
+   local citem = colored_from(styles, "You get%s+(.-)%s+from the")   -- @-coded item
+   local zone, roomid, room = room_now()
+   -- insert-if-new then bump, so it works on any SQLite version (no UPSERT needed)
+   db:exec(string.format(
+      "INSERT OR IGNORE INTO loot (item,item_color,mob,zone,roomid,room,count,last_seen) VALUES (%s,%s,%s,%s,%d,%s,0,%d);",
+      q(item), q(citem), q(mob), q(zone), roomid, q(room), os.time()))
+   db:exec(string.format(
+      "UPDATE loot SET count=count+1, zone=%s, roomid=%d, room=%s, last_seen=%d WHERE item=%s AND mob=%s;",
+      q(zone), roomid, q(room), os.time(), q(item), q(mob)))
+   if citem ~= "" then
+      db:exec(string.format("UPDATE loot SET item_color=%s WHERE item=%s AND mob=%s;", q(citem), q(item), q(mob)))
+   end
+end
+
+-- native shop stock ('---' Qty). Keyed on (item, roomid) so re-listing updates price.
+function on_shop (name, line, wildcards, styles)
+   local item = trim(wildcards[3])
+   if item == "" then return end
+   local citem = colored_from(styles, "%-%-%-%s+(.+)$")   -- @-coded item after the Qty dashes
+   local zone, roomid, room = room_now()
+   local lv, pr = tonumber(wildcards[1]) or 0, tonumber(wildcards[2]) or 0
+   db:exec(string.format(
+      "INSERT OR IGNORE INTO shop_stock (item,item_color,keeper,zone,roomid,room,price,level,last_seen) VALUES (%s,%s,'',%s,%d,%s,%d,%d,%d);",
+      q(item), q(citem), q(zone), roomid, q(room), pr, lv, os.time()))
+   db:exec(string.format(
+      "UPDATE shop_stock SET price=%d, level=%d, zone=%s, room=%s, last_seen=%d WHERE item=%s AND roomid=%d;",
+      pr, lv, q(zone), q(room), os.time(), q(item), roomid))
+   if citem ~= "" then
+      db:exec(string.format("UPDATE shop_stock SET item_color=%s WHERE item=%s AND roomid=%d;", q(citem), q(item), roomid))
+   end
+end
+
+-- write one gathered row (item from a room source, keyed on item+source+room)
+local function record_gather (item, citem, source)
+   local zone, roomid, room = room_now()
+   db:exec(string.format(
+      "INSERT OR IGNORE INTO gathered (item,item_color,source,zone,roomid,room,count,last_seen) VALUES (%s,%s,%s,%s,%d,%s,0,%d);",
+      q(item), q(citem), q(source), q(zone), roomid, q(room), os.time()))
+   db:exec(string.format(
+      "UPDATE gathered SET count=count+1, zone=%s, room=%s, last_seen=%d WHERE item=%s AND source=%s AND roomid=%d;",
+      q(zone), q(room), os.time(), q(item), q(source), roomid))
+   if citem ~= "" then
+      db:exec(string.format("UPDATE gathered SET item_color=%s WHERE item=%s AND source=%s AND roomid=%d;",
+         q(citem), q(item), q(source), roomid))
+   end
+   return roomid, zone, room
+end
+
+-- 'loot here' flow: send a get, then catch its "You get <item>." to record the
+-- full item name (+ colour) as a floor spawn at the current room.
+local here_pending = false
+local function here_disarm () here_pending = false; EnableTrigger("here_catch", false); DeleteTimer("here_timeout") end
+
+function on_here_catch (name, line, wildcards, styles)
+   if not here_pending then return end
+   local item = trim(wildcards[1])
+   if item:find(" from ", 1, true) then return end   -- a container get slipped in; keep waiting
+   here_disarm()
+   if item:match("^[%d,]+ gold coins?$") then ColourNote("silver","", TITLE..": that was gold, not recorded."); return end
+   local citem = colored_from(styles, "You get%s+(.-)%s*%.$")
+   local roomid, _, room = record_gather(item, citem, "the ground")
+   ColourNote("green","", "Recorded '"..item.."' on the ground in "..(room ~= "" and room or "?").." ("..roomid..").")
+end
+
+function here_timeout ()
+   if here_pending then here_disarm(); ColourNote("orange","", TITLE..": no pickup seen -- is the item here? Nothing recorded.") end
+end
+
+-- room-resource gather: "You get <item> from <source>" where source is a room
+-- object (bush, chest, desk...), NOT a corpse and NOT one of your own containers.
+function on_get (name, line, wildcards, styles)
+   local item, source = trim(wildcards[1]), trim(wildcards[2])
+   if item == "" or source == "" then return end
+   if item:match("^[%d,]+ gold coins?$") then return end        -- gold
+   if source:lower():find("corpse", 1, true) then return end    -- corpse loot handled by on_loot
+   if my_bags[source:lower()] then return end                   -- a container you carry (invdata)
+   if is_bag(source) then return end                            -- word-list fallback for bags
+   record_gather(item, colored_from(styles, "You get%s+(.-)%s+from "), source)
+end
+
+-- campaign/quest goal target: mob -> area (quest-spawned mobs S&D never scans)
+function on_target (mob, area)
+   mob, area = trim(mob), trim(area)
+   if mob == "" or area == "" then return end
+   db:exec(string.format("INSERT OR IGNORE INTO targets (mob,area,last_seen) VALUES (%s,%s,%d);",
+      q(mob), q(area), os.time()))
+   db:exec(string.format("UPDATE targets SET last_seen=%d WHERE mob=%s AND area=%s;",
+      os.time(), q(mob), q(area)))
+end
+
+------------------------------------------------------------------
+-- queries (local commands)
+------------------------------------------------------------------
+local function count_of (tbl)
+   for row in db:nrows("SELECT COUNT(*) AS n FROM " .. tbl) do return row.n end
+   return 0
+end
+
+local function show_item (term)
+   term = trim(term)
+   if term == "" then ColourNote("silver","","Usage: loot item <text>"); return end
+   local sql = string.format(
+      "SELECT item,mob,zone,roomid,room,count FROM loot WHERE item LIKE %s ORDER BY item, count DESC",
+      q("%"..term.."%"))
+   local n = 0
+   for r in db:nrows(sql) do
+      n = n + 1
+      ColourNote("cyan","", r.item)
+      ColourNote("white","", string.format("   from %s in %s -- %s (%d)  x%d",
+         r.mob, r.zone ~= "" and r.zone or "?", r.room ~= "" and r.room or "?", r.roomid, r.count))
+   end
+   if n == 0 then ColourNote("silver","","No looted item matching '"..term.."'.") end
+end
+
+local function show_mob (term)
+   term = trim(term)
+   if term == "" then ColourNote("silver","","Usage: loot mob <text>"); return end
+   local sql = string.format(
+      "SELECT mob,item,zone,roomid,room,count FROM loot WHERE mob LIKE %s ORDER BY mob, count DESC",
+      q("%"..term.."%"))
+   local n = 0
+   for r in db:nrows(sql) do
+      n = n + 1
+      ColourNote("cyan","", r.mob.."  ("..(r.zone ~= "" and r.zone or "?").." -- "..(r.room ~= "" and r.room or "?").." "..(r.roomid or 0)..")")
+      ColourNote("white","", string.format("   drops %s  x%d", r.item, r.count))
+   end
+   if n == 0 then ColourNote("silver","","No mob drops matching '"..term.."'.") end
+end
+
+local function show_shop (term)
+   term = trim(term)
+   if term == "" then ColourNote("silver","","Usage: loot shop <text>"); return end
+   local sql = string.format(
+      "SELECT item,zone,roomid,room,price,level FROM shop_stock WHERE item LIKE %s ORDER BY price",
+      q("%"..term.."%"))
+   local n = 0
+   for r in db:nrows(sql) do
+      n = n + 1
+      ColourNote("cyan","", r.item)
+      ColourNote("white","", string.format("   %d gold (lvl %d) @ %s -- %s (%d)",
+         r.price or 0, r.level or 0, r.zone ~= "" and r.zone or "?", r.room ~= "" and r.room or "?", r.roomid))
+   end
+   if n == 0 then ColourNote("silver","","No shop stock matching '"..term.."'.") end
+end
+
+-- remove rows by item name (optionally scoped to one room id) from every item table
+local function del_item (rest)
+   rest = trim(rest)
+   if rest == "" then ColourNote("silver","","Usage: loot del <item> [roomid]   (roomid scopes to that one room)"); return end
+   local item, roomid = rest, nil
+   local id = rest:match("%s(%d+)$")                     -- trailing " <number>" = a room id
+   if id then item = trim(rest:sub(1, #rest - #id)); roomid = tonumber(id) end
+
+   local cond = "item LIKE " .. q("%"..item.."%")
+   if roomid then cond = cond .. " AND roomid = " .. roomid end
+   local total = 0
+   for _, t in ipairs({ {"loot","loot"}, {"shop_stock","shop"}, {"gathered","gathered"} }) do
+      local n = 0
+      for r in db:nrows("SELECT COUNT(*) AS n FROM "..t[1].." WHERE "..cond) do n = r.n end
+      if n > 0 then
+         db:exec("DELETE FROM "..t[1].." WHERE "..cond)
+         ColourNote("white","", "  "..t[2]..": removed "..n)
+         total = total + n
+      end
+   end
+   if total == 0 then ColourNote("silver","","No rows matching '"..item.."'"..(roomid and (" in room "..roomid) or "")..".")
+   else ColourNote("green","","Deleted "..total.." row(s) matching '"..item.."'"..(roomid and (" in room "..roomid) or "")..".") end
+end
+
+local function show_gathered (term)
+   term = trim(term)
+   local where = term ~= "" and (" WHERE item LIKE "..q("%"..term.."%").." OR source LIKE "..q("%"..term.."%")) or ""
+   local n = 0
+   for r in db:nrows("SELECT item,source,zone,roomid,room,count FROM gathered"..where.." ORDER BY count DESC LIMIT 40") do
+      n = n + 1
+      ColourNote("cyan","", r.item)
+      ColourNote("white","", string.format("   from %s in %s -- %s (%d)  x%d",
+         r.source, r.zone ~= "" and r.zone or "?", r.room ~= "" and r.room or "?", r.roomid, r.count))
+   end
+   if n == 0 then ColourNote("silver","","No gathered items"..(term ~= "" and " matching '"..term.."'." or " yet.")) end
+end
+
+local function show_bags (rest)
+   local sub, w = rest:match("^(%S*)%s*(.*)$")
+   sub, w = (sub or ""):lower(), trim(w or ""):lower()
+   if sub == "add" and w ~= "" then exclude[w] = true; save_exclude(); ColourNote("green","","Ignoring gather sources matching '"..w.."'.")
+   elseif sub == "del" and w ~= "" then exclude[w] = nil; save_exclude(); ColourNote("green","","No longer ignoring '"..w.."'.")
+   else
+      local carried = {}; for x in pairs(my_bags) do carried[#carried+1] = x end; table.sort(carried)
+      ColourNote("cyan","","Containers you carry (from invdata, rename-proof):")
+      ColourNote("white","","  "..(#carried > 0 and table.concat(carried, ", ") or "(none seen yet -- type 'inv')"))
+      local t = {}; for x in pairs(exclude) do t[#t+1] = x end; table.sort(t)
+      ColourNote("cyan","","Fallback word-list (source containing any = ignored):")
+      ColourNote("white","","  "..table.concat(t, ", "))
+      ColourNote("silver","","loot bags add <word> | loot bags del <word>")
+   end
+end
+
+local function show_goals (term)
+   term = trim(term)
+   local where = term ~= "" and (" WHERE mob LIKE "..q("%"..term.."%").." OR area LIKE "..q("%"..term.."%")) or ""
+   local n = 0
+   for r in db:nrows("SELECT mob,area FROM targets"..where.." ORDER BY last_seen DESC LIMIT 40") do
+      n = n + 1
+      ColourNote("white","", string.format("   %-32s -> %s", r.mob, r.area))
+   end
+   if n == 0 then ColourNote("silver","","No goal targets recorded"..(term ~= "" and " matching '"..term.."'." or " yet.")) end
+end
+
+local function show_recent ()
+   local n = 0
+   for r in db:nrows("SELECT item,mob,zone,last_seen FROM loot ORDER BY last_seen DESC LIMIT 15") do
+      n = n + 1
+      ColourNote("white","", string.format("   %-30s <- %-24s (%s)", r.item, r.mob, r.zone ~= "" and r.zone or "?"))
+   end
+   if n == 0 then ColourNote("silver","","Nothing recorded yet.") end
+end
+
+------------------------------------------------------------------
+-- command dispatch
+------------------------------------------------------------------
+function lt_cmd (arg)
+   arg = trim(arg)
+   local verb, rest = arg:match("^(%S+)%s*(.*)$")
+   verb = (verb or ""):lower()
+
+   if verb == "" or verb == "status" then
+      ColourNote("cyan","", TITLE.." v"..PVER)
+      ColourNote("white","", "  loot rows : "..count_of("loot"))
+      ColourNote("white","", "  shop rows : "..count_of("shop_stock"))
+      ColourNote("white","", "  gathered  : "..count_of("gathered"))
+      ColourNote("white","", "  goals     : "..count_of("targets"))
+
+   elseif verb == "item" then show_item(rest)
+   elseif verb == "mob"  then show_mob(rest)
+   elseif verb == "shop" then show_shop(rest)
+   elseif verb == "gathered" or verb == "gather" then show_gathered(rest)
+   elseif verb == "here" or verb == "ground" then
+      local kw = trim(rest)
+      if kw == "" then ColourNote("silver","","Usage: loot here <keyword>   (picks it up and records the room spawn)"); return end
+      here_pending = true
+      EnableTrigger("here_catch", true)
+      AddTimer("here_timeout", 0, 0, 3, "", timer_flag.Enabled + timer_flag.OneShot + timer_flag.Replace + timer_flag.Temporary, "here_timeout")
+      Send("get " .. kw)
+   elseif verb == "del" or verb == "forget" or verb == "remove" then del_item(rest)
+   elseif verb == "bags" then show_bags(rest)
+   elseif verb == "goals" or verb == "goal" then show_goals(rest)
+   elseif verb == "recent" then show_recent()
+
+   elseif verb == "clear" then
+      if rest == "loot" then db:exec("DELETE FROM loot;"); ColourNote("green","","Loot table cleared.")
+      elseif rest == "shop" then db:exec("DELETE FROM shop_stock;"); ColourNote("green","","Shop table cleared.")
+      elseif rest == "gathered" then db:exec("DELETE FROM gathered;"); ColourNote("green","","Gathered table cleared.")
+      elseif rest == "goals" then db:exec("DELETE FROM targets;"); ColourNote("green","","Goal targets cleared.")
+      else ColourNote("silver","","Type 'loot clear loot|shop|gathered|goals'.") end
+
+   else
+      ColourNote("cyan","", TITLE.." v"..PVER)
+      for _, l in ipairs({
+         "  loot               - row counts",
+         "  loot item <text>   - where an item drops from (mob / zone / room)",
+         "  loot mob <text>    - what a mob drops",
+         "  loot shop <text>   - which shops natively stock an item (price / zone)",
+         "  loot gathered <text> - where a room resource (bush/chest/...) is picked up",
+         "  loot here <keyword>- get a room-floor spawn and record its full name/colour",
+         "  loot del <item> [roomid] - remove matching rows (roomid scopes to one room)",
+         "  loot bags [add|del <word>] - container words ignored for gathers",
+         "  loot goals [text]  - campaign/quest goal targets (mob -> area)",
+         "  loot recent        - last 15 things looted",
+         "  loot clear loot|shop|gathered|goals - wipe a table",
+         "  loot help          - this",
+         "Records every item you loot off a corpse, and native shop stock ('---'",
+         "qty) when you 'list'. SolaoBot reads this DB for 'solbot item <name>'.",
+      }) do ColourNote("white","", l) end
+   end
+end
+
+------------------------------------------------------------------
+-- lifecycle
+------------------------------------------------------------------
+function OnPluginInstall ()
+   DBFILE = GetInfo(66) .. "SolaoLoot.db"
+   load_exclude()
+   local ok, err = pcall(opendb)
+   if not ok then
+      ColourNote("red","", TITLE..": could not open database -- "..tostring(err))
+   end
+end
+
+function OnPluginClose ()
+   if db then db:close(); db = nil end
+end
+]]>
+</script>
+</muclient>
