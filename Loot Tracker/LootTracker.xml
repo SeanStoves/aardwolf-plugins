@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="2.7"
+   version="2.8"
 >
 </plugin>
 
@@ -566,9 +566,6 @@ local function do_auth ()
          SetVariable("authkey", trim(key))        -- kept in plugin state, never displayed
          SetVariable("authname", name)
          ColourNote("green","", TITLE..": authenticated as "..name..". 'loot upload' / 'loot update' are ready.")
-      elseif status == 409 then
-         ColourNote("orange","", TITLE..": '"..name.."' is already registered (this happens after a fresh reinstall).")
-         ColourNote("orange","", TITLE..": your key lives server-side -- tell Solao to reissue it for you.")
       else
          ColourNote("orange","", TITLE..": auth failed (status "..tostring(status)..").")
       end
