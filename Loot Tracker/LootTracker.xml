@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="2.5"
+   version="2.6"
 >
 </plugin>
 
@@ -95,6 +95,7 @@
 <script>
 <![CDATA[
 require "gmcphelper"
+require "json"                                          -- json.encode / json.decode (bundled)
 local ok_colors = pcall(require, "aardwolf_colors")   -- StylesToColours
 pcall(function () async = require "async" end)        -- global; async HTTP for the share API
 
@@ -466,40 +467,38 @@ local SHARE_COLS = {
 local SHARE_ORDER = { "loot", "shop_stock", "gathered", "targets" }
 
 -- serialize the whole DB to the shared TSV format (also the HTTP wire body)
+-- serialize the whole DB to a JSON object: { <table> = [ {col=val,...}, ... ], ... }
+-- this is both the file format and the HTTP wire body.
 local function serialize_db ()
-   local out, rows = {}, 0
+   local data, rows = {}, 0
    for _, tbl in ipairs(SHARE_ORDER) do
-      local cols = SHARE_COLS[tbl]
-      out[#out+1] = "#"..tbl.."\t"..table.concat(cols, "\t")
+      local cols, arr = SHARE_COLS[tbl], {}
       for r in db:nrows("SELECT "..table.concat(cols, ",").." FROM "..tbl) do
-         local v = {}
-         for _, c in ipairs(cols) do v[#v+1] = tostring(r[c] or ""):gsub("[\t\r\n]", " ") end
-         out[#out+1] = table.concat(v, "\t")
-         rows = rows + 1
+         local o = {}
+         for _, c in ipairs(cols) do o[c] = r[c] end
+         arr[#arr+1] = o; rows = rows + 1
       end
+      data[tbl] = arr
    end
-   return table.concat(out, "\n").."\n", rows
+   return json.encode(data), rows
 end
 
--- merge a shared TSV dump into the DB (existing rows kept). returns added, seen
+-- merge a shared JSON dump into the DB (existing rows kept). returns added, seen
 local function merge_dump (text)
-   local before = db:total_changes()
-   local tbl, cols, seen = nil, nil, 0
+   local ok, data = pcall(json.decode, tostring(text or ""))
+   if not ok or type(data) ~= "table" then return 0, 0 end
+   local before, seen = db:total_changes(), 0
    db:exec("BEGIN")
-   for raw in (tostring(text).."\n"):gmatch("(.-)\n") do
-      local line = (raw:gsub("\r$", ""))
-      if line:sub(1,1) == "#" then
-         tbl, cols = nil, nil
-         local head = {}
-         for p in (line:sub(2).."\t"):gmatch("(.-)\t") do head[#head+1] = p end
-         if SHARE_COLS[head[1]] then tbl = head[1]; cols = {}; for i = 2, #head do cols[#cols+1] = head[i] end end
-      elseif tbl and cols and line ~= "" then
-         local vals = {}
-         for v in (line.."\t"):gmatch("(.-)\t") do vals[#vals+1] = v end
-         if #vals == #cols then
-            local qs = {}; for _, v in ipairs(vals) do qs[#qs+1] = q(v) end
-            db:exec("INSERT OR IGNORE INTO "..tbl.." ("..table.concat(cols, ",")..") VALUES ("..table.concat(qs, ",")..")")
-            seen = seen + 1
+   for _, tbl in ipairs(SHARE_ORDER) do
+      local cols, arr = SHARE_COLS[tbl], data[tbl]
+      if type(arr) == "table" then
+         for _, o in ipairs(arr) do
+            if type(o) == "table" then
+               local qs = {}
+               for _, c in ipairs(cols) do local v = o[c]; qs[#qs+1] = q(v == nil and "" or v) end
+               db:exec("INSERT OR IGNORE INTO "..tbl.." ("..table.concat(cols, ",")..") VALUES ("..table.concat(qs, ",")..")")
+               seen = seen + 1
+            end
          end
       end
    end
@@ -508,7 +507,7 @@ local function merge_dump (text)
 end
 
 local function do_export (fn)
-   fn = trim(fn); if fn == "" then fn = "SolaoLoot-share.txt" end
+   fn = trim(fn); if fn == "" then fn = "SolaoLoot-share.json" end
    local path = GetInfo(66) .. fn
    local f = io.open(path, "w")
    if not f then ColourNote("red","", TITLE..": can't write "..path); return end
@@ -532,9 +531,10 @@ end
 -- shared API service (default off). 'loot api <url>' sets the endpoint, then
 -- 'loot auth' registers this character and stores the key (never shown). upload
 -- pushes your DB; update pulls + merges the pool. Straight HTTP, no game traffic.
---   POST <api>/auth   body = char name        -> returns the auth key
---   POST <api>/loot   x-api-key, body = dump   -> server merges it in
---   GET  <api>/loot   x-api-key                -> returns the pooled dump
+--   POST <api>/auth   JSON {"name":..}          -> JSON {"key":..}
+--   POST <api>/loot   x-api-key, JSON dump      -> server merges it in
+--   GET  <api>/loot   x-api-key                 -> JSON pooled dump
+-- (JSON body shape: { loot=[{col:val,..},..], shop_stock=[..], gathered=[..], targets=[..] })
 ------------------------------------------------------------------
 local function api_url ()  return trim(GetVariable("api") or "") end
 local function auth_key () return trim(GetVariable("authkey") or "") end
@@ -555,12 +555,15 @@ local function do_auth ()
    local name = trim(gmcp("char.base.name") or "")
    if name == "" then name = trim(utils.inputbox("Character name to register with the loot pool:", TITLE, "") or "") end
    if name == "" then ColourNote("silver","", TITLE..": auth cancelled."); return end
-   local req = { method = "POST", source = name,
-      headers = { ["content-type"] = "text/plain", ["content-length"] = tostring(#name) } }
+   local body = json.encode({ name = name })
+   local req = { method = "POST", source = body,
+      headers = { ["content-type"] = "application/json", ["content-length"] = tostring(#body) } }
    ColourNote("silver","", TITLE..": registering '"..name.."'...")
    async.doAsyncRemoteRequest(api_url().."/auth", function (rc, page, status)
-      if status == 200 and type(page) == "string" and trim(page) ~= "" then
-         SetVariable("authkey", trim(page))       -- kept in plugin state, never displayed
+      local key
+      if type(page) == "string" then local ok, t = pcall(json.decode, page); if ok and type(t) == "table" then key = t.key end end
+      if status == 200 and key and trim(key) ~= "" then
+         SetVariable("authkey", trim(key))        -- kept in plugin state, never displayed
          SetVariable("authname", name)
          ColourNote("green","", TITLE..": authenticated as "..name..". 'loot upload' / 'loot update' are ready.")
       else
@@ -573,7 +576,7 @@ local function do_upload ()
    if not (need_api() and need_auth()) then return end
    local body = serialize_db()
    local req = { method = "POST", source = body,
-      headers = { ["content-type"] = "text/plain", ["content-length"] = tostring(#body), ["x-api-key"] = auth_key() } }
+      headers = { ["content-type"] = "application/json", ["content-length"] = tostring(#body), ["x-api-key"] = auth_key() } }
    ColourNote("silver","", TITLE..": uploading "..#body.." bytes...")
    async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
       if status == 200 then ColourNote("green","", TITLE..": upload ok."..(page and page ~= "" and ("  "..page) or ""))
