@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.0"
+   version="3.1"
 >
 </plugin>
 
@@ -534,10 +534,13 @@ end
 -- shared API service (default off). 'loot api <url>' sets the endpoint, then
 -- 'loot auth' registers this character and stores the key (never shown). upload
 -- pushes your DB; update pulls + merges the pool. Straight HTTP, no game traffic.
---   POST <api>/auth   JSON {"name":..}          -> JSON {"key":..}
+--   POST <api>/auth   JSON {"name":..}          -> JSON {"key":.., "name":..}
 --   POST <api>/loot   x-api-key, JSON dump      -> server merges it in
 --   GET  <api>/loot   x-api-key                 -> JSON pooled dump
 -- (JSON body shape: { loot=[{col:val,..},..], shop_stock=[..], gathered=[..], targets=[..] })
+-- On a 401 from /loot the key is dead: re-auth ONCE and retry ONCE. Never re-auth
+-- on any other status -- each /auth mints a NEW account (name may get a -2 suffix),
+-- so careless re-registration would fragment one player across many accounts.
 ------------------------------------------------------------------
 local function api_url ()  return API_URL end
 local function auth_key () return trim(GetVariable("authkey") or "") end
@@ -552,6 +555,67 @@ local function need_auth ()
    return true
 end
 
+-- POST /auth for `name`; store the key AND the name the server returns (it may add
+-- a -N suffix if the name is taken). cb(true/false).
+local function register (name, cb)
+   local body = json.encode({ name = name })
+   local req = { method = "POST", source = body,
+      headers = { ["content-type"] = "application/json", ["content-length"] = tostring(#body) } }
+   async.doAsyncRemoteRequest(api_url().."/auth", function (rc, page, status)
+      local key, rname
+      if type(page) == "string" then
+         local ok, t = pcall(json.decode, page)
+         if ok and type(t) == "table" then key = t.key; rname = t.name end
+      end
+      if status == 200 and key and trim(key) ~= "" then
+         SetVariable("authkey", trim(key))                 -- hidden; never displayed
+         SetVariable("authname", trim(rname or name))      -- store what the server gave back
+         if cb then cb(true) end
+      elseif status == 429 then
+         ColourNote("orange","", TITLE..": auth rate-limited (429) -- wait a while before trying again.")
+         if cb then cb(false) end
+      else
+         ColourNote("orange","", TITLE..": auth failed (status "..tostring(status)..").")
+         if cb then cb(false) end
+      end
+   end, nil, 30, nil, req)
+end
+
+-- key got a 401: throw it away and register fresh under the real character name
+local function reauth (cb)
+   local name = trim(gmcp("char.base.name") or "")
+   if name == "" then name = trim(GetVariable("authname") or "") end
+   if name == "" then
+      ColourNote("orange","", TITLE..": key rejected and no character name to re-auth with -- run 'loot auth'.")
+      if cb then cb(false) end; return
+   end
+   SetVariable("authkey", "")   -- discard the dead key first
+   ColourNote("silver","", TITLE..": key was rejected, re-registering '"..name.."'...")
+   register(name, cb)
+end
+
+-- run a /loot request; on 401 re-auth once then retry once, then give up
+local function loot_request (method, body, on_ok, retried)
+   local req = { method = method, headers = { ["x-api-key"] = auth_key() } }
+   if body then
+      req.source = body
+      req.headers["content-type"] = "application/json"
+      req.headers["content-length"] = tostring(#body)
+   end
+   async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
+      if status == 401 and not retried then
+         reauth(function (ok)
+            if ok then loot_request(method, body, on_ok, true)
+            else ColourNote("orange","", TITLE..": sync aborted -- couldn't get a valid key.") end
+         end)
+      elseif status == 401 then
+         ColourNote("orange","", TITLE..": still unauthorized after re-auth -- try again later.")
+      else
+         on_ok(rc, page, status)
+      end
+   end, nil, 30, nil, req)
+end
+
 -- register this character with the pool; the API returns a key we store hidden
 local function do_auth ()
    if auth_key() ~= "" then
@@ -562,47 +626,31 @@ local function do_auth ()
    local name = trim(gmcp("char.base.name") or "")
    if name == "" then name = trim(utils.inputbox("Character name to register with the loot pool:", TITLE, "") or "") end
    if name == "" then ColourNote("silver","", TITLE..": auth cancelled."); return end
-   local body = json.encode({ name = name })
-   local req = { method = "POST", source = body,
-      headers = { ["content-type"] = "application/json", ["content-length"] = tostring(#body) } }
    ColourNote("silver","", TITLE..": registering '"..name.."'...")
-   async.doAsyncRemoteRequest(api_url().."/auth", function (rc, page, status)
-      local key
-      if type(page) == "string" then local ok, t = pcall(json.decode, page); if ok and type(t) == "table" then key = t.key end end
-      if status == 200 and key and trim(key) ~= "" then
-         SetVariable("authkey", trim(key))        -- kept in plugin state, never displayed
-         SetVariable("authname", name)
-         ColourNote("green","", TITLE..": authenticated as "..name..". 'loot upload' / 'loot update' are ready.")
-      else
-         ColourNote("orange","", TITLE..": auth failed (status "..tostring(status)..").")
-      end
-   end, nil, 30, nil, req)
+   register(name, function (ok)
+      if ok then ColourNote("green","", TITLE..": authenticated as "..(GetVariable("authname") or name)..". 'loot upload' / 'loot update' are ready.") end
+   end)
 end
 
 local function do_upload ()
    if not (need_api() and need_auth()) then return end
    local body = serialize_db()
-   local req = { method = "POST", source = body,
-      headers = { ["content-type"] = "application/json", ["content-length"] = tostring(#body), ["x-api-key"] = auth_key() } }
    ColourNote("silver","", TITLE..": uploading "..#body.." bytes...")
-   async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
+   loot_request("POST", body, function (rc, page, status)
       if status == 200 then ColourNote("green","", TITLE..": upload ok."..(page and page ~= "" and ("  "..page) or ""))
-      elseif status == 401 or status == 403 then ColourNote("orange","", TITLE..": auth rejected -- run 'loot auth' again.")
       else ColourNote("orange","", TITLE..": upload failed (status "..tostring(status)..").") end
-   end, nil, 30, nil, req)
+   end)
 end
 
 local function do_update ()
    if not (need_api() and need_auth()) then return end
-   local req = { method = "GET", headers = { ["x-api-key"] = auth_key() } }
    ColourNote("silver","", TITLE..": fetching the shared pool...")
-   async.doAsyncRemoteRequest(api_url().."/loot", function (rc, page, status)
+   loot_request("GET", nil, function (rc, page, status)
       if status == 200 and type(page) == "string" then
          local added, seen = merge_dump(page)
          ColourNote("green","", TITLE..": update ok -- "..added.." new row(s) ("..seen.." read).")
-      elseif status == 401 or status == 403 then ColourNote("orange","", TITLE..": auth rejected -- run 'loot auth' again.")
       else ColourNote("orange","", TITLE..": update failed (status "..tostring(status)..").") end
-   end, nil, 30, nil, req)
+   end)
 end
 
 function lt_cmd (arg)
