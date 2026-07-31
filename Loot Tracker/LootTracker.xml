@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="4.0"
+   version="4.1"
 >
 </plugin>
 
@@ -593,13 +593,20 @@ end
 local APPRAISE_MAX  = 60     -- refuse absurd ranges from a typo
 local APPRAISE_WAIT = 1      -- seconds between sends
 local appraise_q, appraise_n = {}, 0
+-- bumped on every new run, so ticks left over from a cancelled or replaced run
+-- recognise themselves as stale and do nothing
+local appraise_gen = 0
 
-local function arm_appraise ()
-   AddTimer("appraise_tick", 0, 0, APPRAISE_WAIT, "",
-      timer_flag.Enabled + timer_flag.OneShot + timer_flag.Replace + timer_flag.Temporary, "appraise_tick")
+-- NOT a named one-shot timer: MUSHclient deletes a one-shot after its script runs,
+-- and that cleanup also removes a same-named timer the script just added -- so a
+-- self-rearming timer fires exactly twice and stops. DoAfterSpecial has no name to
+-- collide with.
+local function arm_appraise (gen)
+   DoAfterSpecial(APPRAISE_WAIT, "appraise_tick(" .. gen .. ")", sendto.script)
 end
 
-function appraise_tick ()
+function appraise_tick (gen)
+   if tonumber(gen) ~= appraise_gen then return end       -- stale tick from an old run
    local n = table.remove(appraise_q, 1)
    if not n then
       ColourNote("green","", TITLE..": bulk appraise done ("..appraise_n.." sent).")
@@ -612,7 +619,14 @@ function appraise_tick ()
    end
    appraise_n = appraise_n + 1
    Send("appraise " .. n)
-   arm_appraise()          -- next item, or the summary when the queue runs dry
+   arm_appraise(gen)         -- next item, or the summary when the queue runs dry
+end
+
+function appraise_halt ()
+   local left = #appraise_q
+   appraise_q = {}
+   appraise_gen = appraise_gen + 1     -- orphans any tick already in flight
+   return left
 end
 
 function bulk_appraise (a, b)
@@ -625,12 +639,12 @@ function bulk_appraise (a, b)
       ColourNote("orange","", string.format("%s: %d items is over the %d cap -- narrow the range.", TITLE, count, APPRAISE_MAX))
       return
    end
-   appraise_q, appraise_n = {}, 0
-   DeleteTimer("appraise_tick")
+   appraise_halt()                     -- drop anything still running
+   appraise_n = 0
    for i = lo, hi do appraise_q[#appraise_q+1] = i end
    ColourNote("silver","", string.format("%s: appraising %d-%d (%d items, ~%ds). 'loot appraise stop' to halt.",
       TITLE, lo, hi, count, count * APPRAISE_WAIT))
-   appraise_tick()
+   appraise_tick(appraise_gen)
 end
 
 ------------------------------------------------------------------
@@ -1401,9 +1415,7 @@ function lt_cmd (arg)
       local sub = trim(rest):lower()
       local lo, hi = sub:match("^(%d+)%s*%-%s*(%d+)$")
       if sub == "stop" then
-         local left = #appraise_q
-         appraise_q = {}
-         DeleteTimer("appraise_tick")
+         local left = appraise_halt()
          ColourNote(left > 0 and "orange" or "silver","", TITLE..": bulk appraise "
             ..(left > 0 and ("stopped, "..left.." unsent.") or "wasn't running."))
       elseif lo then bulk_appraise(lo, hi)
