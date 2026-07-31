@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.4"
+   version="3.6"
 >
 </plugin>
 
@@ -980,7 +980,7 @@ local function loot_request (method, body, on_ok, retried)
       else
          on_ok(rc, page, status)
       end
-   end, nil, 30, nil, req)
+   end, nil, 60, nil, req)
 end
 
 -- register this character with the pool; the API returns a key we store hidden
@@ -999,14 +999,84 @@ local function do_auth ()
    end)
 end
 
+-- Upload in slices, capped by BYTES not row count.
+--
+-- The whole DB in one POST was ~144KB and never arrived: the body is handed to a
+-- background thread and pushed through LuaSocket, and past roughly one socket
+-- buffer (~64KB) fewer bytes reach the wire than content-length advertises, so the
+-- server sits waiting for a body that never finishes. Staying well under that
+-- boundary avoids it entirely. A row cap alone wouldn't -- one item with a long
+-- notes/flags field could blow the budget -- so slices are cut on encoded size.
+local MAX_BODY     = 32768   -- hard ceiling per POST, half a socket buffer
+local UPLOAD_READ  = 200     -- rows to consider per slice
+
+-- Rows from `tbl` starting at `offset`, taking as many as fit in MAX_BODY.
+-- Returns the body and how many rows it actually covers (never 0 unless dry).
+-- Each row is encoded on its own and joined, so the length we measure is the
+-- length we send -- no second encoding pass to drift away from content-length.
+local function serialize_slice (tbl, offset)
+   local cols = SHARE_COLS[tbl]
+   local parts, used, bytes = {}, 0, 0
+   for r in db:nrows("SELECT "..table.concat(cols, ",").." FROM "..tbl
+                     .." ORDER BY rowid LIMIT "..UPLOAD_READ.." OFFSET "..offset) do
+      local o = {}
+      for _, c in ipairs(cols) do o[c] = r[c] end
+      local enc = json.encode(o)
+      -- always take at least one row, even if that row is enormous on its own
+      if used > 0 and (bytes + #enc) > MAX_BODY then break end
+      parts[#parts+1] = enc
+      bytes = bytes + #enc + 1
+      used  = used + 1
+   end
+   if used == 0 then return nil, 0 end
+   return '{"'..tbl..'":['..table.concat(parts, ",")..']}', used
+end
+
 local function do_upload ()
    if not (need_api() and need_auth()) then return end
-   local body = serialize_db()
-   ColourNote("silver","", TITLE..": uploading "..#body.." bytes...")
-   loot_request("POST", body, function (rc, page, status)
-      if status == 200 then ColourNote("green","", TITLE..": upload ok."..(page and page ~= "" and ("  "..page) or ""))
-      else ColourNote("orange","", TITLE..": upload failed (status "..tostring(status)..").") end
-   end)
+
+   local totals, grand = {}, 0
+   for _, t in ipairs(SHARE_ORDER) do
+      totals[t] = count_of(t)
+      grand = grand + totals[t]
+   end
+   if grand == 0 then ColourNote("silver","", TITLE..": nothing to upload."); return end
+   ColourNote("silver","", TITLE..": uploading "..grand.." rows...")
+
+   local ti, off, sent, batch = 1, 0, 0, 0
+   local function step ()
+      -- advance past tables we've finished (or that were empty)
+      while ti <= #SHARE_ORDER and off >= (totals[SHARE_ORDER[ti]] or 0) do
+         ti, off = ti + 1, 0
+      end
+      if ti > #SHARE_ORDER then
+         ColourNote("green","", string.format("%s: upload ok -- %d rows in %d batches.", TITLE, sent, batch))
+         return
+      end
+
+      local tbl = SHARE_ORDER[ti]
+      local body, used = serialize_slice(tbl, off)
+      if not body then ti, off = ti + 1, 0; step(); return end
+      batch = batch + 1
+      local n = used
+      loot_request("POST", body, function (rc, page, status)
+         if status == 200 then
+            sent, off = sent + n, off + n
+            ColourNote("silver","", string.format("%s: %s %d/%d  (%d/%d rows)",
+               TITLE, tbl, math.min(off, totals[tbl]), totals[tbl], sent, grand))
+            step()
+         elseif status == 408 then
+            -- server stopped seeing body bytes: transport, not auth. Re-running
+            -- resumes, since the merge ignores rows already in the pool.
+            ColourNote("orange","", string.format("%s: batch %d (%s) stalled in transit (408). %d rows are in; run 'loot upload' again to resume.",
+               TITLE, batch, tbl, sent))
+         else
+            ColourNote("orange","", string.format("%s: upload stopped at batch %d (%s) -- status %s. %d rows are in; run 'loot upload' again to resume.",
+               TITLE, batch, tbl, tostring(status), sent))
+         end
+      end)
+   end
+   step()
 end
 
 local function do_update ()
