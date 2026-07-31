@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.7"
+   version="3.8"
 >
 </plugin>
 
@@ -1070,22 +1070,41 @@ local function mark_synced (tbl, ids)
    db:exec("UPDATE "..tbl.." SET synced=1 WHERE rowid IN ("..table.concat(ids, ",")..")")
 end
 
-local function do_upload ()
+-- Deltas are cheap but they only declare what changed, and the pool's "how many
+-- players have this item" counter learns from what you declare. Skip that forever
+-- and you never register on the 400 items you already share with everyone. So
+-- re-declare the whole DB on a slow cadence, deltas in between.
+local FULL_EVERY = 7 * 86400          -- a week
+local function full_due ()
+   return (os.time() - (tonumber(GetVariable("lastfull")) or 0)) >= FULL_EVERY
+end
+
+local function do_upload (force_full)
    if not (need_api() and need_auth()) then return end
+
+   local full = force_full or full_due()
+   if full then
+      -- re-declare everything; still goes out in the same size-capped batches
+      for _, t in ipairs(SHARE_ORDER) do db:exec("UPDATE "..t.." SET synced=0;") end
+   end
 
    local grand = pending_all()
    if grand == 0 then
       ColourNote("silver","", TITLE..": nothing new to upload -- the pool already has everything here.")
       return
    end
-   ColourNote("silver","", TITLE..": uploading "..grand.." new/changed rows...")
+   ColourNote("silver","", TITLE..": uploading "..grand..(full and " rows (full re-declare)" or " new/changed rows").."...")
 
    local ti, sent, batch = 1, 0, 0
    local function step ()
       -- move past tables with nothing pending
       while ti <= #SHARE_ORDER and pending_of(SHARE_ORDER[ti]) == 0 do ti = ti + 1 end
       if ti > #SHARE_ORDER then
-         ColourNote("green","", string.format("%s: upload ok -- %d rows in %d batches.", TITLE, sent, batch))
+         -- only stamp a full declare once it actually finished, so an aborted one
+         -- gets retried rather than counting as this week's
+         if full then SetVariable("lastfull", tostring(os.time())) end
+         ColourNote("green","", string.format("%s: upload ok -- %d rows in %d batches.%s",
+            TITLE, sent, batch, full and "  (full re-declare)" or ""))
          return
       end
 
@@ -1184,7 +1203,7 @@ function lt_cmd (arg)
    elseif verb == "export" then do_export(rest)
    elseif verb == "import" then do_import(rest)
    elseif verb == "auth" then do_auth()
-   elseif verb == "upload" then do_upload()
+   elseif verb == "upload" then do_upload(trim(rest):lower() == "full")
    elseif verb == "update" then do_update()
    elseif verb == "api" then
       ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(disabled in this build)"))
@@ -1192,6 +1211,9 @@ function lt_cmd (arg)
       for _, t in ipairs(SHARE_ORDER) do
          ColourNote("white","", string.format("  %-11s %d of %d to sync", t, pending_of(t), count_of(t)))
       end
+      local lf = tonumber(GetVariable("lastfull")) or 0
+      ColourNote("white","", "  full declare: "..(lf > 0 and os.date("%Y-%m-%d %H:%M", lf) or "never")
+         ..(full_due() and "  (due -- next upload re-declares all)" or ""))
 
    -- forget what we've sent, so the next upload re-sends the lot. For when the
    -- pool got wiped server-side and our flags no longer reflect reality.
@@ -1231,7 +1253,8 @@ function lt_cmd (arg)
          "  loot api           - endpoint, auth status, per-table sync backlog",
          "  loot resync yes    - forget sync flags; re-send everything next upload",
          "  loot auth          - register this character with the pool (one time)",
-         "  loot upload        - push your DB to the shared pool (needs auth)",
+         "  loot upload        - push new/changed rows to the pool (needs auth)",
+         "  loot upload full   - re-declare every row now (weekly on its own)",
          "  loot update        - pull + merge the shared pool (needs auth)",
          "  loot clear loot|shop|gathered|stats - wipe a table",
          "  loot help          - this",

@@ -98,7 +98,8 @@ and your auth status.
 - `loot auth` — register this character once. Sends your GMCP character name (or
   asks for one), the service returns an auth key, and the plugin stores it
   **hidden** — you never see or handle the key.
-- `loot upload` — push your DB into the shared pool (needs auth).
+- `loot upload` — push new/changed rows into the shared pool (needs auth).
+  `loot upload full` re-declares everything.
 - `loot update` — pull the pooled data down and merge it (needs auth).
 
 Nothing contacts the API until you run `loot auth`, so it stays quiet until you
@@ -120,6 +121,28 @@ server-side and the local flags no longer reflect reality).
 Uploads go out in slices capped at 32KB of encoded JSON — a failed batch stops
 there, reports how many rows landed, and re-running resumes exactly where it
 stopped. Nothing is marked synced until the server confirms that batch.
+
+**Once a week the whole DB is re-declared** (`loot upload full` forces it now).
+The pool tracks how many players have each row and learns that from what you
+declare, so a pure delta would never register you on the items you already share
+with everyone. The full pass goes out in the same size-capped batches, and the
+timestamp is only recorded once it completes, so an interrupted one retries.
+`loot api` shows when the last one ran.
+
+### If uploads hang instead of failing
+
+Requires a patched `lua/socket.lua`. LuaSocket's socket sinks called
+`sock:send(chunk)` without looping: `send()` returns the *index of the last byte
+written*, not a count, so once the kernel send buffer fills (~64KB) it writes part
+of a chunk and returns a partial index — truthy, so the pump treated it as success
+and dropped the rest. Bodies under one buffer always worked; larger ones arrived
+truncated while `content-length` still advertised the full length, and the server
+waited for bytes that never came until the request timed out.
+
+Fixed in `lua/socket.lua` and `socket/http.lua` (originals kept beside them as
+`*.orig-partialsend`). It's a bundled MUSHclient library, not part of this plugin,
+so a client update may revert it — if large syncs start hanging again, that's the
+first thing to check.
 
 Database: `SolaoLoot.db` in the world-files directory. Window-less — it's capture
 triggers plus a SQLite DB and the `loot` query commands.
