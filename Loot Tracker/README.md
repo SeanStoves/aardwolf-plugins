@@ -8,8 +8,10 @@ plugin required.
 
 ## Requires
 
-- the Aardwolf client package (uses `constants.lua`, `gmcphelper`, bundled
-  `sqlite3`, and `aardwolf_colors`)
+- the Aardwolf client package: `constants.lua`, `gmcphelper`, bundled `sqlite3`,
+  `json` (the share wire format), and `aardwolf_colors` for item colours
+- `async` for the shared-API calls — optional, and only touched once you run
+  `loot auth`. Everything else works without it.
 
 ## What it captures
 
