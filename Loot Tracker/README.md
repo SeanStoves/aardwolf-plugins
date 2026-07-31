@@ -34,6 +34,47 @@ Everything is stamped with the zone / room id / room name from GMCP at the time.
 It does **not** depend on Search & Destroy or any mapper: the mob→room mapping
 comes straight from your own loots via GMCP, so it stands alone.
 
+## Item name variations
+
+Two things the game welds onto item names would otherwise each create their own
+row, so they're stripped for **`loot` and `gathered`** — the tables that answer
+*where does this come from*:
+
+- **Stacked pickups.** `You get 2 * the body armor of Sycorax's minions` is the
+  same item as a single one, so the `N * ` count goes.
+- **Bonus-loot flags** (see `help gameload`). A mob-reset item can roll random
+  stats and gains a flag that becomes part of its name — `(Polished) Runed Jade
+  Bracer`. The flag is a per-kill dice roll, not a different item, so the base
+  name is what gets recorded.
+
+Stripping any leading `(Word)` would wreck real names, though: `(Seekers) Elixir
+of Free Movement`, `(Aarchaeology) ...`, and a shop that genuinely sells
+`(Legendary) Bracers of the Warrior-Poet`. So **two signals must agree** — the
+word is a known flag *and* the bracket colour matches its tier:
+
+| brackets | tier |
+|---|---|
+| `@W((@RGodly@W))` | Godly |
+| `@Y(@W…@Y)` | Divine, Mythical, Fabled, Epic, Legendary |
+| `@R(@W…@R)` | Eternal, Exalted, Majestic, Wondrous, Radiant |
+| `@G(@W…@G)` | Brilliant, Dazzling, Shimmering, Gleaming, Sparkling |
+| `@G(@W…@G)` | Vibrant, Shiny, Burnished, Enhanced, Polished |
+
+That colour test is what saves the shop item: its Legendary is `@W(@MLegendary@W)`
+— white brackets, magenta word — so it's left alone. `loot flags` lists the set and
+`loot flags add|del <word>` edits it.
+
+**`shop_stock` and `item_stats` are deliberately left alone.** Shops sell fixed
+inventory and bonus rolls only happen on mob-reset loot, so a `(...)` in a shop
+name is always real. And a bonus item's stats are *inflated* — filing them under
+the base name would poison the base item's stat block with one lucky roll.
+
+`loot dedupe` retro-fixes rows captured before this existed: names are rewritten to
+their base form, and where that collides with an existing row the counts are folded
+together and the variant dropped. Corrected rows go unsynced so the pool gets the
+fixed version. It can't retract variant rows already *in* the pool — the API has no
+delete path — it just stops new ones going up.
+
 ## Item stats
 
 Where the other tables answer *where did this come from*, `item_stats` answers
@@ -73,6 +114,8 @@ marks them *partial*, so it's easy to re-identify them later.
 | `loot here <keyword>` | get a floor spawn and record its full name/colour |
 | `loot del <item> [roomid]` | remove matching rows (roomid scopes to one room) |
 | `loot bags [add\|del <word>]` | container words ignored for gathers |
+| `loot flags [add\|del <word>]` | bonus-loot flags stripped from names |
+| `loot dedupe` | collapse variant rows already captured |
 | `loot recent` | last 15 things looted |
 | `loot resync yes` | forget sync flags; re-send everything next upload |
 | `loot clear loot\|shop\|gathered\|stats` | wipe a table |

@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.8"
+   version="3.9"
 >
 </plugin>
 
@@ -162,6 +162,89 @@ local function is_bag (source)
    local low = source:lower()
    for w in pairs(exclude) do if low:find(w, 1, true) then return true end end
    return false
+end
+
+-- Bonus-loot variants ('help gameload'). A mob-reset item can roll random stats
+-- and gets a flag welded onto its name: "(Polished) Runed Jade Bracer". The flag
+-- is a per-kill dice roll, not a different item, so for provenance (what drops
+-- where) the base name is what we want -- otherwise every roll spawns a new row.
+--
+-- Can't just strip any leading (Word): plenty of real names start that way --
+-- (Seekers) Elixir of Free Movement, (Aarchaeology) ..., and shops sell a
+-- (Legendary) Bracers of the Warrior-Poet that has nothing to do with the bonus
+-- tier of the same name. So two signals have to agree:
+--   1. the word is a known flag, and
+--   2. the bracket colour matches the tier it belongs to.
+--
+-- The tiers, by bracket colour:
+--   @W((@RGodly@W))                          white, doubled
+--   @Y(@WDivine@Y)    Mythical Fabled Epic Legendary
+--   @R(@WEternal@R)   Exalted Majestic Wondrous Radiant
+--   @G(@WBrilliant@G) Dazzling Shimmering Gleaming Sparkling
+--   @G(@WVibrant@G)   Shiny Burnished Enhanced Polished
+--
+-- That colour check is what saves the shop row: its Legendary is @W(@MLegendary@W)
+-- -- white brackets, magenta word -- so it is left alone. If no colour was
+-- captured at all, the curated word list decides on its own.
+--
+-- NOT applied to shop_stock (shops sell fixed stock; bonus rolls only happen on
+-- mob-reset loot) or item_stats (a bonus item's stats are inflated -- filing them
+-- under the base name would poison the base item with one lucky roll).
+local bonus_flags = {}
+local BONUS_DEFAULT = table.concat({
+   "godly",
+   "divine","mythical","fabled","epic","legendary",
+   "eternal","exalted","majestic","wondrous","radiant",
+   "brilliant","dazzling","shimmering","gleaming","sparkling",
+   "vibrant","shiny","burnished","enhanced","polished",
+}, ",")
+local function load_flags ()
+   bonus_flags = {}
+   for word in (GetVariable("bonusflags") or BONUS_DEFAULT):gmatch("[^,]+") do
+      local w = trim(word):lower():gsub("[%(%)]", "")
+      if w ~= "" then bonus_flags[w] = true end
+   end
+end
+local function save_flags ()
+   local t = {}; for w in pairs(bonus_flags) do t[#t+1] = w end
+   table.sort(t); SetVariable("bonusflags", table.concat(t, ","))
+end
+
+-- Drop a "@Y2@w * " count off the front of a coloured name. Only when everything
+-- before the '*' is colour codes and digits, so a '*' inside a real name is safe.
+local function strip_count_colour (c)
+   local star = c:find("%*")
+   if not star then return c end
+   local head = c:sub(1, star - 1):gsub("@%a", "")
+   if head:match("^%s*%d+%s*$") then return trim(c:sub(star + 1)) end
+   return c
+end
+
+-- strip stacked-pickup count and any bonus flag. citem is the @-coded name.
+local function base_name (item, citem)
+   item = trim(item or "")
+   local coloured = (citem and citem ~= "") and citem or nil
+
+   -- "2 * the body armor of ..." -- the game's stacked-pickup syntax, never a name.
+   -- A stack CAN be of bonus items ("2 * (Polished) Sword"), so the colour has to
+   -- lose the count too or the bracket check below looks at the wrong place.
+   local stripped = item:gsub("^%d+%s*%*%s*", "")
+   if stripped ~= item then
+      item = trim(stripped)
+      if coloured then coloured = strip_count_colour(coloured) end
+   end
+   -- ((Godly)) is doubled and white-bracketed
+   local word, rest = item:match("^%(%((%a+)%)%)%s*(.*)$")
+   if word and bonus_flags[word:lower()] then
+      if (not coloured) or coloured:match("^@W%(%(") then return trim(rest) end
+      return item
+   end
+   -- every other tier is a single (Word) in yellow, red or green brackets
+   word, rest = item:match("^%((%a+)%)%s*(.*)$")
+   if word and bonus_flags[word:lower()] and rest ~= "" then
+      if (not coloured) or coloured:match("^@[YRG]%(") then return trim(rest) end
+   end
+   return item
 end
 
 -- the reliable check: your inventory containers, read live from invdata (rename-
@@ -356,6 +439,7 @@ function on_loot (name, line, wildcards, styles)
    if not (low:match("^a ") or low:match("^an ") or low:match("^the ")) then return end
 
    local citem = colored_from(styles, "You get%s+(.-)%s+from the")   -- @-coded item
+   item = base_name(item, citem)                 -- drop "2 * " and any bonus flag
    local zone, roomid, room = room_now()
    -- insert-if-new then bump, so it works on any SQLite version (no UPSERT needed)
    db:exec(string.format(
@@ -390,6 +474,7 @@ end
 
 -- write one gathered row (item from a room source, keyed on item+source+room)
 local function record_gather (item, citem, source)
+   item = base_name(item, citem)                 -- drop "2 * " and any bonus flag
    local zone, roomid, room = room_now()
    db:exec(string.format(
       "INSERT OR IGNORE INTO gathered (item,item_color,source,zone,roomid,room,count,last_seen) VALUES (%s,%s,%s,%s,%d,%s,0,%d);",
@@ -434,6 +519,54 @@ function on_get (name, line, wildcards, styles)
    if my_bags[source:lower()] then return end                   -- a container you carry (invdata)
    if is_bag(source) then return end                            -- word-list fallback for bags
    record_gather(item, colored_from(styles, "You get%s+(.-)%s+from "), source)
+end
+
+-- Retro-fix rows captured before variants were collapsed. Rewrites the name to its
+-- base form; when that collides with a row that already exists, the counts are
+-- folded together and the variant row goes. Touched rows go unsynced so the pool
+-- gets the corrected version.
+--
+-- Note this cannot un-send the variant rows already sitting in the pool -- the API
+-- has no delete path. It stops us adding more of them.
+local function dedupe_variants ()
+   local renamed, merged = 0, 0
+   -- key columns that identify a row besides the item name
+   local keyed = {
+      loot     = { "mob" },
+      gathered = { "source", "roomid" },
+   }
+   db:exec("BEGIN")
+   for tbl, keys in pairs(keyed) do
+      local fixes = {}
+      for r in db:nrows("SELECT rowid AS rid, * FROM " .. tbl) do
+         local clean = base_name(r.item, r.item_color)
+         if clean ~= "" and clean ~= r.item then
+            local row = {}
+            for _, k in ipairs(keys) do row[k] = r[k] end
+            fixes[#fixes+1] = { rid = r.rid, clean = clean, count = r.count or 1, keys = row }
+         end
+      end
+      for _, f in ipairs(fixes) do
+         local where = "item=" .. q(f.clean)
+         for _, k in ipairs(keys) do
+            local v = f.keys[k]
+            where = where .. " AND " .. k .. "=" .. (type(v) == "number" and tostring(v) or q(v))
+         end
+         local exists = false
+         for _ in db:nrows("SELECT 1 AS one FROM " .. tbl .. " WHERE " .. where) do exists = true end
+         if exists then
+            -- fold the variant's count into the base row, then drop the variant
+            db:exec("UPDATE " .. tbl .. " SET count=count+" .. f.count .. ", synced=0 WHERE " .. where)
+            db:exec("DELETE FROM " .. tbl .. " WHERE rowid=" .. f.rid)
+            merged = merged + 1
+         else
+            db:exec("UPDATE " .. tbl .. " SET item=" .. q(f.clean) .. ", synced=0 WHERE rowid=" .. f.rid)
+            renamed = renamed + 1
+         end
+      end
+   end
+   db:exec("COMMIT")
+   return renamed, merged
 end
 
 ------------------------------------------------------------------
@@ -1199,6 +1332,29 @@ function lt_cmd (arg)
       Send("get " .. kw)
    elseif verb == "del" or verb == "forget" or verb == "remove" then del_item(rest)
    elseif verb == "bags" then show_bags(rest)
+
+   elseif verb == "dedupe" then
+      local renamed, merged = dedupe_variants()
+      if renamed + merged == 0 then
+         ColourNote("green","", TITLE..": nothing to collapse -- no variant rows found.")
+      else
+         ColourNote("green","", string.format("%s: collapsed %d variant row(s) -- %d renamed, %d merged into an existing row. They will re-upload.",
+            TITLE, renamed + merged, renamed, merged))
+      end
+
+   elseif verb == "flags" then
+      local sub, w = rest:match("^(%S*)%s*(.*)$")
+      sub, w = (sub or ""):lower(), trim(w):lower():gsub("[%(%)]", "")
+      if sub == "add" and w ~= "" then bonus_flags[w] = true; save_flags(); ColourNote("green","", TITLE..": '"..w.."' is a bonus flag.")
+      elseif sub == "del" and w ~= "" then bonus_flags[w] = nil; save_flags(); ColourNote("green","", TITLE..": '"..w.."' is no longer treated as a bonus flag.")
+      else
+         local t = {}; for f in pairs(bonus_flags) do t[#t+1] = f end
+         table.sort(t)
+         ColourNote("cyan","","Bonus-loot flags stripped from loot/gathered names ("..#t.."):")
+         ColourNote("white","","  "..table.concat(t, ", "))
+         ColourNote("silver","","Only stripped when the bracket colour matches a bonus tier.")
+         ColourNote("silver","","loot flags add <word> | loot flags del <word>")
+      end
    elseif verb == "recent" then show_recent()
    elseif verb == "export" then do_export(rest)
    elseif verb == "import" then do_import(rest)
@@ -1247,6 +1403,8 @@ function lt_cmd (arg)
          "  loot here <keyword>- get a room-floor spawn and record its full name/colour",
          "  loot del <item> [roomid] - remove matching rows (roomid scopes to one room)",
          "  loot bags [add|del <word>] - container words ignored for gathers",
+         "  loot flags [add|del <word>] - bonus-loot flags stripped from names",
+         "  loot dedupe        - collapse variant rows already captured",
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",
@@ -1272,6 +1430,7 @@ end
 function OnPluginInstall ()
    DBFILE = GetInfo(66) .. "SolaoLoot.db"
    load_exclude()
+   load_flags()
    cfg_autoid = (GetVariable("autoid") == "1")
    if GetVariable("idnote") == "0" then cfg_idnote = false end
    local ok, err = pcall(opendb)
