@@ -10,16 +10,16 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-19"
-   version="2.6"
+   version="2.7"
 >
 </plugin>
 
 <!--
  Player Tracker: captures every line of 'who', stores each player once (keyed on
  name), keeps their clan / ranks / title / level and a last-seen timestamp. The
- miniwindow shows stats plus a searchable, clickable list. Online/offline is only
- truly knowable for your own clan (login/logout notices), so that drives the dot
- for clanmates; everyone else is "online" for a while after the last who sighting.
+ miniwindow shows stats plus a searchable, clickable list. Online = showed up in
+ the most recent who sweep (seen >= last_who); a clan logout notice forces offline
+ immediately, since a sweep can't tell someone left until the next who.
 -->
 
 <triggers>
@@ -178,13 +178,13 @@ end
 ------------------------------------------------------------------
 -- online model
 ------------------------------------------------------------------
--- not seen by a 'who' in this long = offline. Matches the Who Poller's 10 minute
--- cadence: every poll refreshes everyone still on, so anyone who ages out is gone.
-local ONLINE_TTL = 600
-
+-- online = showed up in the most recent 'who' sweep. last_who is stamped when the
+-- sweep starts, so every row it refreshes has seen >= last_who; anyone not in that
+-- sweep keeps an older seen and reads offline. A clan logout forces offline right
+-- away (r.on=false), since a sweep can't know they left until the next who.
 local function is_online (r)
    if r.on == false then return false end
-   return r.on == true and (os.time() - (r.seen or 0) < ONLINE_TTL)
+   return (r.seen or 0) > 0 and r.seen >= (cfg.last_who or 0)
 end
 local function ago (t)
    if not t then return "?" end
@@ -201,7 +201,10 @@ end
 function on_who (line)
    local p = parse(line)
    if not p then return end
-   if not capturing then capturing, who_seen = true, {} end
+   if not capturing then
+      capturing, who_seen = true, {}
+      cfg.last_who = os.time()    -- sweep boundary: stamp before any row updates seen
+   end
    local key = p.name:lower()
    who_seen[key] = true
 
@@ -220,7 +223,9 @@ end
 
 function who_done (n)
    capturing = false
-   cfg.last_who = os.time()
+   -- empty sweep (nobody on): no on_who fired to advance the boundary, so do it here
+   -- to age everyone from the prior who to offline
+   if n == 0 then cfg.last_who = os.time() end
    if n and n > 0 then cfg.avg.sum = cfg.avg.sum + n; cfg.avg.n = cfg.avg.n + 1 end
    rebuild()
    SaveState()
@@ -552,8 +557,8 @@ function pt_help ()
       "  pt help          - this",
       "Window: click a name for info, click the search bar to filter,",
       "wheel to scroll, drag the grip to resize, right-click title for",
-      "Front / Back / Always-on-Top. Online is live for your own clan;",
-      "others show as online for a while after the last 'who'.",
+      "Front / Back / Always-on-Top. Online = in the most recent 'who';",
+      "a clan logout marks offline right away.",
    }) do ColourNote("white","", l) end
 end
 

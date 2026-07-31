@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.1"
+   version="3.3"
 >
 </plugin>
 
@@ -41,16 +41,6 @@
      script="on_shop"
      sequence="100"
   ></trigger>
-
-  <!-- campaign/quest goal target: "You still have to kill * <mob> (<area>)".
-       Gives a goal-mob to area mapping that scan/loot data won't have. -->
-  <trigger
-     enabled="y"
-     match="^You still have to kill \* (.+?) \((.+)\)\s*$"
-     regexp="y"
-     send_to="12"
-     sequence="100"
-  ><send>on_target("%1", "%2")</send></trigger>
 
   <!-- "You get <item> from <source>." room-resource gather. on_get skips corpses
        (loot handles them) and personal containers (bags/pouches/etc). -->
@@ -84,6 +74,41 @@
      script="on_here_catch"
      sequence="90"
   ></trigger>
+
+  <!-- identify / appraise box. "Keywords" is the first row of every one of them, so
+       it opens the capture and arms the row + end triggers. -->
+  <trigger
+     enabled="y"
+     name="id_start"
+     match="^\| Keywords\s+:\s*(.+?)\s*\|$"
+     regexp="y"
+     keep_evaluating="y"
+     script="on_id_start"
+     sequence="100"
+  ></trigger>
+
+  <!-- every row of the box, including the dashed rule rows and the unlabelled
+       continuation rows of a Stat/Resist Mods block -->
+  <trigger
+     enabled="n"
+     name="id_line"
+     match="^[|+](.*)$"
+     regexp="y"
+     keep_evaluating="y"
+     script="on_id_line"
+     sequence="100"
+  ></trigger>
+
+  <!-- first line that is not part of the box closes it -->
+  <trigger
+     enabled="n"
+     name="id_end"
+     match="^[^|+].*$"
+     regexp="y"
+     keep_evaluating="y"
+     script="on_id_end"
+     sequence="100"
+  ></trigger>
 </triggers>
 
 <aliases>
@@ -107,6 +132,12 @@ local API_URL = "https://api.aardwolf.muds.fyi"
 
 local DBFILE
 local db
+
+-- auto-send 'id' on every corpse loot. Needs the identify wish to return anything
+-- useful, so it stays off until you have it ('loot autoid on'). The parser itself
+-- always runs -- a shop 'appraise' fills the DB with no wish and no extra traffic.
+local cfg_autoid = false
+local cfg_idnote = true    -- print a line when stats get stored
 
 local function trim (s) return (s or ""):gsub("^%s+",""):gsub("%s+$","") end
 local function q (s) return "'" .. tostring(s or ""):gsub("'", "''") .. "'" end
@@ -138,16 +169,20 @@ end
 -- my_bags[shortdesc:lower()] = true. A source you 'get from' that is one of these
 -- is your own bag; anything else is a room object.
 local my_bags = {}
+-- shortdesc -> serial for everything you carry. 'id <serial>' is the only reliable
+-- way to identify a specific item, since names aren't keywords.
+local inv_serial = {}
 function on_invitem (name, line, wildcards)
    local parts = {}
    for p in (wildcards[1] .. ","):gmatch("(.-),") do parts[#parts+1] = p end
    local n = #parts
    if n < 7 then return end                       -- serial,flags,desc,level,type,+3 values
-   if tonumber(parts[n-3]) ~= 11 then return end  -- type field; 11 = container only
    local d = {}
    for i = 3, n - 5 do d[#d+1] = parts[i] end      -- desc may itself contain commas
    local desc = trim(table.concat(d, ","))
-   if desc ~= "" then my_bags[desc:lower()] = true end
+   if desc == "" then return end
+   inv_serial[desc:lower()] = trim(parts[1])
+   if tonumber(parts[n-3]) == 11 then my_bags[desc:lower()] = true end   -- 11 = container
 end
 
 ------------------------------------------------------------------
@@ -179,12 +214,6 @@ local function opendb ()
          last_seen  INTEGER,
          PRIMARY KEY (item, roomid)
       );
-      CREATE TABLE IF NOT EXISTS targets (
-         mob       TEXT NOT NULL,
-         area      TEXT NOT NULL,
-         last_seen INTEGER,
-         PRIMARY KEY (mob, area)
-      );
       CREATE TABLE IF NOT EXISTS gathered (
          item       TEXT NOT NULL,
          item_color TEXT,
@@ -196,11 +225,47 @@ local function opendb ()
          last_seen  INTEGER,
          PRIMARY KEY (item, source, roomid)
       );
+      CREATE TABLE IF NOT EXISTS item_stats (
+         item        TEXT NOT NULL,
+         item_color  TEXT,
+         keywords    TEXT,
+         type        TEXT,
+         level       INTEGER,
+         worth       INTEGER,
+         weight      INTEGER,
+         score       INTEGER,
+         wearable    TEXT,
+         material    TEXT,
+         flags       TEXT,
+         found_at    TEXT,
+         clan_item   TEXT,
+         owned_by    TEXT,
+         leads_to    TEXT,
+         notes       TEXT,
+         weapon_type TEXT,
+         ave_dam     INTEGER,
+         specials    TEXT,
+         inflicts    TEXT,
+         dam_type    TEXT,
+         spells      TEXT,
+         capacity    INTEGER,
+         str INTEGER, intel INTEGER, wis INTEGER, dex INTEGER, con INTEGER, luck INTEGER,
+         hp INTEGER, mana INTEGER, moves INTEGER, hit INTEGER, dam INTEGER,
+         all_phys INTEGER, all_magic INTEGER,
+         acid INTEGER, air INTEGER, bash INTEGER, cold INTEGER, disease INTEGER,
+         earth INTEGER, electric INTEGER, energy INTEGER, fire INTEGER, holy INTEGER,
+         light INTEGER, magic INTEGER, mental INTEGER, negative INTEGER, pierce INTEGER,
+         poison INTEGER, shadow INTEGER, slash INTEGER, sonic INTEGER, water INTEGER,
+         full_id     INTEGER NOT NULL DEFAULT 0,
+         last_id     INTEGER,
+         PRIMARY KEY (item)
+      );
       CREATE INDEX IF NOT EXISTS idx_loot_item ON loot(item);
       CREATE INDEX IF NOT EXISTS idx_loot_mob  ON loot(mob);
       CREATE INDEX IF NOT EXISTS idx_shop_item ON shop_stock(item);
-      CREATE INDEX IF NOT EXISTS idx_targ_mob  ON targets(mob);
       CREATE INDEX IF NOT EXISTS idx_gath_item ON gathered(item);
+      CREATE INDEX IF NOT EXISTS idx_stat_item ON item_stats(item);
+      CREATE INDEX IF NOT EXISTS idx_stat_type ON item_stats(type);
    ]]
    -- upgrade older DBs (each ALTER is a no-op-or-error if the column exists)
    for _, a in ipairs({
@@ -208,6 +273,35 @@ local function opendb ()
       "ALTER TABLE loot ADD COLUMN item_color TEXT;",
       "ALTER TABLE shop_stock ADD COLUMN item_color TEXT;",
    }) do pcall(function () db:exec(a) end) end
+end
+
+-- do we already have a full appraisal for this item?
+local function have_full_id (item)
+   for r in db:nrows("SELECT full_id FROM item_stats WHERE item=" .. q(item)) do
+      return r.full_id == 1
+   end
+   return false
+end
+
+-- Auto-identify freshly looted gear. Off by default (needs the identify wish), and
+-- it never fires while you're flagged AFK -- same rule as every other send we make.
+-- Deferred a tick because the {invitem} carrying the serial can arrive after the
+-- "You get" line. Items we already have a full appraisal for are skipped, so a
+-- farming run doesn't re-id the same drop over and over.
+local autoid_q = {}
+local function queue_autoid (item)
+   if not cfg_autoid or item == "" then return end
+   if GetVariable("AFKMode") ~= nil then return end
+   if have_full_id(item) then return end
+   autoid_q[#autoid_q+1] = item
+   DoAfterSpecial(1, "drain_autoid()", sendto.script)
+end
+
+function drain_autoid ()
+   local item = table.remove(autoid_q, 1)
+   if not item then return end
+   local serial = inv_serial[item:lower()]
+   if serial then Send("id " .. serial) end   -- no serial means it's already gone
 end
 
 -- pull the coloured (@-coded) run of the item out of a matched line's styles
@@ -249,6 +343,7 @@ function on_loot (name, line, wildcards, styles)
    if citem ~= "" then
       db:exec(string.format("UPDATE loot SET item_color=%s WHERE item=%s AND mob=%s;", q(citem), q(item), q(mob)))
    end
+   queue_autoid(item)
 end
 
 -- native shop stock ('---' Qty). Keyed on (item, roomid) so re-listing updates price.
@@ -317,14 +412,207 @@ function on_get (name, line, wildcards, styles)
    record_gather(item, colored_from(styles, "You get%s+(.-)%s+from "), source)
 end
 
--- campaign/quest goal target: mob -> area (quest-spawned mobs S&D never scans)
-function on_target (mob, area)
-   mob, area = trim(mob), trim(area)
-   if mob == "" or area == "" then return end
-   db:exec(string.format("INSERT OR IGNORE INTO targets (mob,area,last_seen) VALUES (%s,%s,%d);",
-      q(mob), q(area), os.time()))
-   db:exec(string.format("UPDATE targets SET last_seen=%d WHERE mob=%s AND area=%s;",
-      os.time(), q(mob), q(area)))
+------------------------------------------------------------------
+-- identify / appraise capture
+------------------------------------------------------------------
+-- Aardwolf prints the same boxed table for 'id', 'appraise' and a shop appraise:
+--
+--   | Keywords   : whip lash pious weapon                             |
+--   | Name       : Lash of the Pious                                  |
+--   | Type       : Weapon                    Level  :   131           |
+--   | Worth      : 22,380                    Weight :     1           |
+--   +-----------------------------------------------------------------+
+--   | Weapon Type: whip                   Average Dam :    294        |
+--   +-----------------------------------------------------------------+
+--   | Stat Mods  : Hit roll     : +13      Damage roll  : +13         |
+--   |              Strength     : +1       Intelligence : +1          |
+--
+-- Two things to watch: the mod blocks pack two "Label : +N" pairs per line and
+-- continue on unlabelled lines, and numbers carry commas (22,380).
+--
+-- Nothing here sends a command. It reads boxes that already scrolled past, so
+-- shop 'appraise' fills the DB even without the identify wish.
+
+local STAT_MAP = {
+   ["Strength"] = "str", ["Intelligence"] = "intel", ["Wisdom"] = "wis",
+   ["Dexterity"] = "dex", ["Constitution"] = "con", ["Luck"] = "luck",
+   ["Hit points"] = "hp", ["Mana"] = "mana", ["Moves"] = "moves",
+   ["Hit roll"] = "hit", ["Damage roll"] = "dam",
+   ["All physical"] = "all_phys", ["All magic"] = "all_magic",
+   ["Acid"] = "acid", ["Air"] = "air", ["Bash"] = "bash", ["Cold"] = "cold",
+   ["Disease"] = "disease", ["Earth"] = "earth", ["Electric"] = "electric",
+   ["Energy"] = "energy", ["Fire"] = "fire", ["Holy"] = "holy",
+   ["Light"] = "light", ["Magic"] = "magic", ["Mental"] = "mental",
+   ["Negative"] = "negative", ["Pierce"] = "pierce", ["Poison"] = "poison",
+   ["Shadow"] = "shadow", ["Slash"] = "slash", ["Sonic"] = "sonic",
+   ["Water"] = "water",
+}
+
+-- text columns; everything else in item_stats is numeric
+local STAT_TEXT = {
+   item = true, item_color = true, keywords = true, type = true, wearable = true,
+   material = true, flags = true, found_at = true, clan_item = true,
+   owned_by = true, leads_to = true, notes = true, weapon_type = true,
+   specials = true, inflicts = true, dam_type = true, spells = true,
+}
+
+-- one "Label : value" per box row, mapped to its column
+local ID_FIELDS = {
+   ["Keywords"]    = "keywords",
+   ["Type"]        = "type",
+   ["Worth"]       = "worth",
+   ["Weight"]      = "weight",
+   ["Level"]       = "level",
+   ["Score"]       = "score",
+   ["Wearable"]    = "wearable",
+   ["Material"]    = "material",
+   ["Flags"]       = "flags",
+   ["Found at"]    = "found_at",
+   ["Clan Item"]   = "clan_item",
+   ["Owned By"]    = "owned_by",
+   ["Leads to"]    = "leads_to",
+   ["Weapon Type"] = "weapon_type",
+   ["Average Dam"] = "ave_dam",
+   ["Specials"]    = "specials",
+   ["Inflicts"]    = "inflicts",
+   ["Damage Type"] = "dam_type",
+   ["Capacity"]    = "capacity",
+}
+
+local idrec        = nil    -- row being built, nil when not inside a box
+local id_mod_block = nil    -- "stat" while a Stat/Resist Mods continuation may follow
+
+local function num (s)
+   return tonumber((tostring(s or ""):gsub(",", "")))
+end
+
+-- "Label : +3   Other : -2" -> set both columns. Also handles the unlabelled
+-- continuation rows, which are just more pairs.
+local function id_mods (text)
+   for label, sign, digits in text:gmatch("([A-Za-z][A-Za-z ]-)%s*:%s*([%+%-])(%d+)") do
+      local col = STAT_MAP[trim(label)]
+      if col then idrec[col] = tonumber(sign .. digits) end
+   end
+end
+
+function on_id_start (name, line, wildcards, styles)
+   idrec = { full_id = 1 }
+   id_mod_block = nil
+   idrec.keywords = trim(wildcards[1])
+   EnableTrigger("id_line", true)
+   EnableTrigger("id_end", true)
+end
+
+function on_id_line (name, line, wildcards, styles)
+   if not idrec then return end
+   local body = wildcards[1] or ""
+
+   -- Name carries the item's colour, so pull it from the styles run
+   local nm = body:match("^%s*Name%s+:%s*(.-)%s*|?%s*$")
+   if nm then
+      idrec.item = trim(nm)
+      idrec.item_color = colored_from(styles, "Name@?%a?%s+:%s*(.-)%s*@?%a?|")
+      if idrec.item_color == "" then idrec.item_color = nil end
+      id_mod_block = nil
+      return
+   end
+
+   -- Stat Mods / Resist Mods open a block that continues on unlabelled rows
+   local mods = body:match("^%s*Stat Mods%s*:(.*)$") or body:match("^%s*Resist Mods%s*:(.*)$")
+   if mods then
+      id_mods(mods)
+      id_mod_block = "stat"
+      return
+   end
+   -- an unlabelled row while a mod block is open is a continuation
+   if id_mod_block and body:match("^%s+[A-Za-z][A-Za-z ]-%s*:%s*[%+%-]%d") then
+      id_mods(body)
+      return
+   end
+
+   -- Notes repeats; keep them joined rather than clobbering
+   local note = body:match("^%s*Notes%s+:%s*(.-)%s*|?%s*$")
+   if note and note ~= "" then
+      idrec.notes = (idrec.notes and (idrec.notes .. "; ") or "") .. note
+      id_mod_block = nil
+      return
+   end
+
+   -- Spells can list several uses; join them too
+   local sp = body:match("^%s*Spells%s+:%s*(.-)%s*|?%s*$")
+   if sp and sp ~= "" then
+      idrec.spells = (idrec.spells and (idrec.spells .. "; ") or "") .. sp
+      id_mod_block = nil
+      return
+   end
+
+   -- plain "Label : value" pairs. Rows pack two of them ("Type : Weapon   Level : 131"),
+   -- so a value can't run to the next colon or it swallows the following label. Walk the
+   -- colons instead: a label is the text since the last run of 2+ spaces (real labels
+   -- like "Weapon Type" use single spaces, column padding is always wider), and a value
+   -- runs from its colon to where the next label starts.
+   local found = {}
+   local pos = 1
+   while true do
+      local c = body:find(":", pos, true)
+      if not c then break end
+      local pre = body:sub(1, c - 1):gsub("%s+$", "")
+      local lstart, scan = 1, 1
+      while true do
+         local a, b = pre:find("%s%s+", scan)
+         if not a then break end
+         lstart, scan = b + 1, b + 1
+      end
+      found[#found+1] = { label = trim(pre:sub(lstart)), lstart = lstart, vstart = c + 1 }
+      pos = c + 1
+   end
+
+   local hit = false
+   for i, p in ipairs(found) do
+      local col = ID_FIELDS[p.label]
+      if col then
+         local vend = found[i+1] and (found[i+1].lstart - 1) or #body
+         local v = trim((body:sub(p.vstart, vend):gsub("|%s*$", "")))
+         if v ~= "" then
+            idrec[col] = STAT_TEXT[col] and v or num(v)
+            hit = true
+         end
+      end
+   end
+   if hit then id_mod_block = nil end
+end
+
+local function id_store ()
+   local r = idrec
+   idrec, id_mod_block = nil, nil
+   EnableTrigger("id_line", false)
+   EnableTrigger("id_end", false)
+   if not r or not r.item or r.item == "" then return end
+
+   r.last_id = os.time()
+   local cols, vals, sets = {}, {}, {}
+   for k, v in pairs(r) do
+      local lit = STAT_TEXT[k] and q(v) or tostring(v)
+      cols[#cols+1] = k
+      vals[#vals+1] = lit
+      if k ~= "item" then sets[#sets+1] = k .. "=" .. lit end
+   end
+   db:exec(string.format("INSERT OR IGNORE INTO item_stats (%s) VALUES (%s);",
+      table.concat(cols, ","), table.concat(vals, ",")))
+   -- only overwrite the columns this identify actually produced
+   db:exec(string.format("UPDATE item_stats SET %s WHERE item=%s;",
+      table.concat(sets, ","), q(r.item)))
+   if cfg_idnote then
+      ColourNote("green","", TITLE..": stats stored for "..r.item)
+   end
+end
+
+-- the box ends at the first line that isn't part of it. Without the identify wish
+-- that line is the "full appraisal" nag, which is exactly how we know the record
+-- is partial and worth re-identifying later.
+function on_id_end (name, line, wildcards, styles)
+   if idrec and line:find("full appraisal", 1, true) then idrec.full_id = 0 end
+   id_store()
 end
 
 ------------------------------------------------------------------
@@ -347,6 +635,15 @@ local function show_item (term)
       ColourNote("cyan","", r.item)
       ColourNote("white","", string.format("   from %s in %s -- %s (%d)  x%d",
          r.mob, r.zone ~= "" and r.zone or "?", r.room ~= "" and r.room or "?", r.roomid, r.count))
+      -- if we've identified it, one line of what it actually is
+      for s in db:nrows("SELECT type,level,score,worth FROM item_stats WHERE item="..q(r.item)) do
+         local t = {}
+         if s.type  then t[#t+1] = s.type end
+         if s.level then t[#t+1] = "L"..s.level end
+         if s.score then t[#t+1] = s.score.." score" end
+         if s.worth then t[#t+1] = s.worth.."g" end
+         if #t > 0 then ColourNote("silver","", "   "..table.concat(t, "  ").."   ('loot stats' for the rest)") end
+      end
    end
    if n == 0 then ColourNote("silver","","No looted item matching '"..term.."'.") end
 end
@@ -364,6 +661,69 @@ local function show_mob (term)
       ColourNote("white","", string.format("   drops %s  x%d", r.item, r.count))
    end
    if n == 0 then ColourNote("silver","","No mob drops matching '"..term.."'.") end
+end
+
+-- the stat block for one item, laid out like the game's own box but condensed
+local STAT_ROW = {
+   { "str","Str" }, { "intel","Int" }, { "wis","Wis" }, { "dex","Dex" },
+   { "con","Con" }, { "luck","Luck" }, { "hp","Hp" }, { "mana","Mana" },
+   { "moves","Mv" }, { "hit","Hit" }, { "dam","Dam" },
+}
+local RESIST_ROW = {
+   { "all_phys","AllPhys" }, { "all_magic","AllMagic" }, { "acid","Acid" },
+   { "air","Air" }, { "bash","Bash" }, { "cold","Cold" }, { "disease","Disease" },
+   { "earth","Earth" }, { "electric","Electric" }, { "energy","Energy" },
+   { "fire","Fire" }, { "holy","Holy" }, { "light","Light" }, { "magic","Magic" },
+   { "mental","Mental" }, { "negative","Negative" }, { "pierce","Pierce" },
+   { "poison","Poison" }, { "shadow","Shadow" }, { "slash","Slash" },
+   { "sonic","Sonic" }, { "water","Water" },
+}
+
+-- "Str +3  Dam +6" from whichever columns this row actually has
+local function mods_line (r, spec)
+   local t = {}
+   for _, p in ipairs(spec) do
+      local v = tonumber(r[p[1]])
+      if v and v ~= 0 then t[#t+1] = string.format("%s %+d", p[2], v) end
+   end
+   return table.concat(t, "  ")
+end
+
+local function show_stats (term)
+   term = trim(term)
+   if term == "" then ColourNote("silver","","Usage: loot stats <text>"); return end
+   local n = 0
+   for r in db:nrows("SELECT * FROM item_stats WHERE item LIKE "..q("%"..term.."%").." ORDER BY level DESC LIMIT 10") do
+      n = n + 1
+      ColourNote("cyan","", (r.item_color and r.item_color ~= "" and r.item_color or r.item))
+      local head = {}
+      if r.type   then head[#head+1] = r.type end
+      if r.level  then head[#head+1] = "L"..r.level end
+      if r.score  then head[#head+1] = r.score.." score" end
+      if r.worth  then head[#head+1] = r.worth.."g" end
+      if r.weight then head[#head+1] = r.weight.." wt" end
+      if #head > 0 then ColourNote("white","", "   "..table.concat(head, "  ")) end
+      if r.wearable and r.wearable ~= "" then ColourNote("white","", "   Worn  : "..r.wearable) end
+
+      local sm = mods_line(r, STAT_ROW)
+      if sm ~= "" then ColourNote("white","", "   Stats : "..sm) end
+      local rm = mods_line(r, RESIST_ROW)
+      if rm ~= "" then ColourNote("white","", "   Resist: "..rm) end
+
+      if r.weapon_type and r.weapon_type ~= "" then
+         ColourNote("white","", "   Weapon: "..r.weapon_type..(r.ave_dam and ("  ave "..r.ave_dam) or "")
+            ..(r.specials and r.specials ~= "" and ("  ["..r.specials.."]") or ""))
+      end
+      if r.inflicts and r.inflicts ~= "" then
+         ColourNote("white","", "   Infl  : "..r.inflicts..(r.dam_type and r.dam_type ~= "" and (" ("..r.dam_type..")") or ""))
+      end
+      if r.spells and r.spells ~= "" then ColourNote("white","", "   Spells: "..r.spells) end
+      if r.flags and r.flags ~= "" then ColourNote("silver","", "   Flags : "..r.flags) end
+      if r.found_at and r.found_at ~= "" then ColourNote("silver","", "   Found : "..r.found_at) end
+      if r.keywords and r.keywords ~= "" then ColourNote("silver","", "   Keys  : "..r.keywords) end
+      if r.full_id ~= 1 then ColourNote("orange","", "   (partial -- no identify wish when this was recorded)") end
+   end
+   if n == 0 then ColourNote("silver","","No item stats matching '"..term.."'. Appraise or id it first.") end
 end
 
 local function show_shop (term)
@@ -435,17 +795,6 @@ local function show_bags (rest)
    end
 end
 
-local function show_goals (term)
-   term = trim(term)
-   local where = term ~= "" and (" WHERE mob LIKE "..q("%"..term.."%").." OR area LIKE "..q("%"..term.."%")) or ""
-   local n = 0
-   for r in db:nrows("SELECT mob,area FROM targets"..where.." ORDER BY last_seen DESC LIMIT 40") do
-      n = n + 1
-      ColourNote("white","", string.format("   %-32s -> %s", r.mob, r.area))
-   end
-   if n == 0 then ColourNote("silver","","No goal targets recorded"..(term ~= "" and " matching '"..term.."'." or " yet.")) end
-end
-
 local function show_recent ()
    local n = 0
    for r in db:nrows("SELECT item,mob,zone,last_seen FROM loot ORDER BY last_seen DESC LIMIT 15") do
@@ -465,9 +814,16 @@ local SHARE_COLS = {
    loot       = {"item","item_color","mob","zone","roomid","room","count","last_seen"},
    shop_stock = {"item","item_color","keeper","zone","roomid","room","price","level","last_seen"},
    gathered   = {"item","item_color","source","zone","roomid","room","count","last_seen"},
-   targets    = {"mob","area","last_seen"},
+   item_stats = {"item","item_color","keywords","type","level","worth","weight","score",
+                 "wearable","material","flags","found_at","clan_item","owned_by","leads_to",
+                 "notes","weapon_type","ave_dam","specials","inflicts","dam_type","spells",
+                 "capacity","str","intel","wis","dex","con","luck","hp","mana","moves",
+                 "hit","dam","all_phys","all_magic","acid","air","bash","cold","disease",
+                 "earth","electric","energy","fire","holy","light","magic","mental",
+                 "negative","pierce","poison","shadow","slash","sonic","water",
+                 "full_id","last_id"},
 }
-local SHARE_ORDER = { "loot", "shop_stock", "gathered", "targets" }
+local SHARE_ORDER = { "loot", "shop_stock", "gathered", "item_stats" }
 
 -- serialize the whole DB to the shared TSV format (also the HTTP wire body)
 -- serialize the whole DB to a JSON object: { <table> = [ {col=val,...}, ... ], ... }
@@ -537,7 +893,7 @@ end
 --   POST <api>/auth   JSON {"name":..}          -> JSON {"key":.., "name":..}
 --   POST <api>/loot   x-api-key, JSON dump      -> server merges it in
 --   GET  <api>/loot   x-api-key                 -> JSON pooled dump
--- (JSON body shape: { loot=[{col:val,..},..], shop_stock=[..], gathered=[..], targets=[..] })
+-- (JSON body shape: { loot=[{col:val,..},..], shop_stock=[..], gathered=[..] })
 -- On a 401 from /loot the key is dead: re-auth ONCE and retry ONCE. Never re-auth
 -- on any other status -- each /auth mints a NEW account (name may get a -2 suffix),
 -- so careless re-registration would fragment one player across many accounts.
@@ -663,11 +1019,38 @@ function lt_cmd (arg)
       ColourNote("white","", "  loot rows : "..count_of("loot"))
       ColourNote("white","", "  shop rows : "..count_of("shop_stock"))
       ColourNote("white","", "  gathered  : "..count_of("gathered"))
-      ColourNote("white","", "  goals     : "..count_of("targets"))
+      ColourNote("white","", "  id'd items: "..count_of("item_stats").."  (auto-id "..(cfg_autoid and "on" or "off")..")")
 
    elseif verb == "item" then show_item(rest)
    elseif verb == "mob"  then show_mob(rest)
    elseif verb == "shop" then show_shop(rest)
+   elseif verb == "stats" or verb == "stat" then show_stats(rest)
+
+   -- send an identify and let the box parser catch it
+   elseif verb == "id" then
+      local kw = trim(rest)
+      if kw == "" then ColourNote("silver","","Usage: loot id <keyword>   (or 'loot autoid on|off')"); return end
+      Send("id " .. kw)
+
+   elseif verb == "autoid" then
+      local s = trim(rest):lower()
+      if s == "on" then
+         cfg_autoid = true; SetVariable("autoid", "1")
+         ColourNote("green","", TITLE..": auto-identify on loot is ON. Needs the identify wish to return full stats.")
+      elseif s == "off" then
+         cfg_autoid = false; SetVariable("autoid", "0")
+         ColourNote("green","", TITLE..": auto-identify on loot is off.")
+      else
+         ColourNote("cyan","", TITLE..": auto-identify is "..(cfg_autoid and "ON" or "off")..".  'loot autoid on|off'")
+         ColourNote("silver","","Appraise and manual 'id' are always captured -- this only controls sending 'id' for you.")
+      end
+
+   -- the "stats stored" confirmation gets noisy if you appraise a whole shop
+   elseif verb == "idnote" then
+      local s = trim(rest):lower()
+      if s == "on" then cfg_idnote = true; SetVariable("idnote", "1"); ColourNote("green","", TITLE..": will confirm each stat capture.")
+      elseif s == "off" then cfg_idnote = false; SetVariable("idnote", "0"); ColourNote("green","", TITLE..": stat captures are silent now.")
+      else ColourNote("cyan","", TITLE..": stat-capture notices are "..(cfg_idnote and "on" or "off")..".  'loot idnote on|off'") end
    elseif verb == "gathered" or verb == "gather" then show_gathered(rest)
    elseif verb == "here" or verb == "ground" then
       local kw = trim(rest)
@@ -678,7 +1061,6 @@ function lt_cmd (arg)
       Send("get " .. kw)
    elseif verb == "del" or verb == "forget" or verb == "remove" then del_item(rest)
    elseif verb == "bags" then show_bags(rest)
-   elseif verb == "goals" or verb == "goal" then show_goals(rest)
    elseif verb == "recent" then show_recent()
    elseif verb == "export" then do_export(rest)
    elseif verb == "import" then do_import(rest)
@@ -693,8 +1075,8 @@ function lt_cmd (arg)
       if rest == "loot" then db:exec("DELETE FROM loot;"); ColourNote("green","","Loot table cleared.")
       elseif rest == "shop" then db:exec("DELETE FROM shop_stock;"); ColourNote("green","","Shop table cleared.")
       elseif rest == "gathered" then db:exec("DELETE FROM gathered;"); ColourNote("green","","Gathered table cleared.")
-      elseif rest == "goals" then db:exec("DELETE FROM targets;"); ColourNote("green","","Goal targets cleared.")
-      else ColourNote("silver","","Type 'loot clear loot|shop|gathered|goals'.") end
+      elseif rest == "stats" then db:exec("DELETE FROM item_stats;"); ColourNote("green","","Item stats cleared.")
+      else ColourNote("silver","","Type 'loot clear loot|shop|gathered|stats'.") end
 
    else
       ColourNote("cyan","", TITLE.." v"..PVER)
@@ -704,10 +1086,13 @@ function lt_cmd (arg)
          "  loot mob <text>    - what a mob drops",
          "  loot shop <text>   - which shops natively stock an item (price / zone)",
          "  loot gathered <text> - where a room resource (bush/chest/...) is picked up",
+         "  loot stats <text>  - stat block for an item (level/mods/resists/weapon)",
+         "  loot id <keyword>  - identify an item and store its stats",
+         "  loot autoid on|off - auto-identify freshly looted gear (needs identify wish)",
+         "  loot idnote on|off - confirm each stat capture on screen",
          "  loot here <keyword>- get a room-floor spawn and record its full name/colour",
          "  loot del <item> [roomid] - remove matching rows (roomid scopes to one room)",
          "  loot bags [add|del <word>] - container words ignored for gathers",
-         "  loot goals [text]  - campaign/quest goal targets (mob -> area)",
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",
@@ -715,10 +1100,12 @@ function lt_cmd (arg)
          "  loot auth          - register this character with the pool (one time)",
          "  loot upload        - push your DB to the shared pool (needs auth)",
          "  loot update        - pull + merge the shared pool (needs auth)",
-         "  loot clear loot|shop|gathered|goals - wipe a table",
+         "  loot clear loot|shop|gathered|stats - wipe a table",
          "  loot help          - this",
          "Records every item you loot off a corpse, and native shop stock ('---'",
-         "qty) when you 'list'. SolaoBot reads this DB for 'solbot item <name>'.",
+         "qty) when you 'list'. Any identify or appraise box that scrolls past is",
+         "parsed for stats too, so shop appraises fill the DB with no wish needed.",
+         "SolaoBot reads this DB for 'solbot item <name>'.",
       }) do ColourNote("white","", l) end
    end
 end
@@ -729,6 +1116,8 @@ end
 function OnPluginInstall ()
    DBFILE = GetInfo(66) .. "SolaoLoot.db"
    load_exclude()
+   cfg_autoid = (GetVariable("autoid") == "1")
+   if GetVariable("idnote") == "0" then cfg_idnote = false end
    local ok, err = pcall(opendb)
    if not ok then
       ColourNote("red","", TITLE..": could not open database -- "..tostring(err))
