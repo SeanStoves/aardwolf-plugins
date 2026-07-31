@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.9"
+   version="4.0"
 >
 </plugin>
 
@@ -113,6 +113,17 @@
 
 <aliases>
   <alias match="^loot(?:\s+(.*))?$" regexp="y" enabled="y" ignore_case="y" send_to="12"><send>lt_cmd("%1")</send></alias>
+
+  <!-- 'appraise 3-18' walks the range. Matches ONLY digits-dash-digits, so
+       'appraise 4' and 'appraise sword' are not caught and go to the game as
+       typed. -->
+  <alias
+     match="^appraise\s+(\d+)\s*-\s*(\d+)\s*$"
+     regexp="y"
+     enabled="y"
+     ignore_case="y"
+     send_to="12"
+  ><send>bulk_appraise("%1", "%2")</send></alias>
 </aliases>
 
 <include name="constants.lua"/>
@@ -567,6 +578,59 @@ local function dedupe_variants ()
    end
    db:exec("COMMIT")
    return renamed, merged
+end
+
+------------------------------------------------------------------
+-- bulk appraise: "appraise 3-18" walks a shop's list numbers
+------------------------------------------------------------------
+-- The alias only matches a <num>-<num> range, so everything else falls straight
+-- through to the game: 'appraise 4' and 'appraise sword' behave exactly as before.
+--
+-- Each appraise prints the same box the parser below already reads, so this fills
+-- item_stats for a whole shop in one pass. Paced one per second instead of fired in
+-- a burst -- 20 commands at once is command spam and Aardwolf will treat it as such.
+-- Stops if you go AFK partway, same rule as every other send this plugin makes.
+local APPRAISE_MAX  = 60     -- refuse absurd ranges from a typo
+local APPRAISE_WAIT = 1      -- seconds between sends
+local appraise_q, appraise_n = {}, 0
+
+local function arm_appraise ()
+   AddTimer("appraise_tick", 0, 0, APPRAISE_WAIT, "",
+      timer_flag.Enabled + timer_flag.OneShot + timer_flag.Replace + timer_flag.Temporary, "appraise_tick")
+end
+
+function appraise_tick ()
+   local n = table.remove(appraise_q, 1)
+   if not n then
+      ColourNote("green","", TITLE..": bulk appraise done ("..appraise_n.." sent).")
+      return
+   end
+   if GetVariable("AFKMode") ~= nil then
+      ColourNote("orange","", TITLE..": you're flagged AFK -- bulk appraise stopped ("..(#appraise_q + 1).." left).")
+      appraise_q = {}
+      return
+   end
+   appraise_n = appraise_n + 1
+   Send("appraise " .. n)
+   arm_appraise()          -- next item, or the summary when the queue runs dry
+end
+
+function bulk_appraise (a, b)
+   local lo, hi = tonumber(a), tonumber(b)
+   if not (lo and hi) then return end
+   if lo > hi then lo, hi = hi, lo end                    -- 'appraise 12-1' reads fine too
+   if lo < 1 then lo = 1 end
+   local count = hi - lo + 1
+   if count > APPRAISE_MAX then
+      ColourNote("orange","", string.format("%s: %d items is over the %d cap -- narrow the range.", TITLE, count, APPRAISE_MAX))
+      return
+   end
+   appraise_q, appraise_n = {}, 0
+   DeleteTimer("appraise_tick")
+   for i = lo, hi do appraise_q[#appraise_q+1] = i end
+   ColourNote("silver","", string.format("%s: appraising %d-%d (%d items, ~%ds). 'loot appraise stop' to halt.",
+      TITLE, lo, hi, count, count * APPRAISE_WAIT))
+   appraise_tick()
 end
 
 ------------------------------------------------------------------
@@ -1333,6 +1397,18 @@ function lt_cmd (arg)
    elseif verb == "del" or verb == "forget" or verb == "remove" then del_item(rest)
    elseif verb == "bags" then show_bags(rest)
 
+   elseif verb == "appraise" then
+      local sub = trim(rest):lower()
+      local lo, hi = sub:match("^(%d+)%s*%-%s*(%d+)$")
+      if sub == "stop" then
+         local left = #appraise_q
+         appraise_q = {}
+         DeleteTimer("appraise_tick")
+         ColourNote(left > 0 and "orange" or "silver","", TITLE..": bulk appraise "
+            ..(left > 0 and ("stopped, "..left.." unsent.") or "wasn't running."))
+      elseif lo then bulk_appraise(lo, hi)
+      else ColourNote("silver","","Usage: appraise <first>-<last>  (e.g. appraise 1-12)  |  loot appraise stop") end
+
    elseif verb == "dedupe" then
       local renamed, merged = dedupe_variants()
       if renamed + merged == 0 then
@@ -1405,6 +1481,8 @@ function lt_cmd (arg)
          "  loot bags [add|del <word>] - container words ignored for gathers",
          "  loot flags [add|del <word>] - bonus-loot flags stripped from names",
          "  loot dedupe        - collapse variant rows already captured",
+         "  appraise <a>-<b>   - appraise a range of shop list numbers, paced",
+         "  loot appraise stop - halt a running bulk appraise",
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",

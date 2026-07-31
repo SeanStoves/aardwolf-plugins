@@ -85,6 +85,12 @@ hit/dam), the `Resist Mods` block (all physical, all magic, and each element),
 weapon data (type, average damage, specials, inflicts, damage type), castable
 spells, portal destinations and container capacity.
 
+To fill a whole shop at once, `appraise 1-12` walks that range of `list` numbers,
+one per second. The alias matches **only** digits-dash-digits, so `appraise 4`,
+`appraise sword` and even `appraise 2-handed sword` go to the game exactly as
+typed. It stops if you go AFK partway, caps at 60 items so a typo can't fire off
+hundreds of commands, and `loot appraise stop` halts it.
+
 Two things worth knowing:
 
 - **This is passive.** It reads boxes already on your screen and sends nothing.
@@ -107,6 +113,8 @@ marks them *partial*, so it's easy to re-identify them later.
 | `loot mob <text>` | what a mob drops and where it was |
 | `loot shop <text>` | which shops natively stock an item |
 | `loot gathered <text>` | where a room resource is picked up |
+| `appraise <a>-<b>` | appraise a range of shop list numbers, paced |
+| `loot appraise stop` | halt a running bulk appraise |
 | `loot stats <text>` | stat block for an item (level, mods, resists, weapon) |
 | `loot id <keyword>` | identify an item and store its stats |
 | `loot autoid on\|off` | auto-identify fresh drops (needs identify wish, off by default) |
