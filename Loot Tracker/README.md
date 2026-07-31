@@ -129,20 +129,24 @@ with everyone. The full pass goes out in the same size-capped batches, and the
 timestamp is only recorded once it completes, so an interrupted one retries.
 `loot api` shows when the last one ran.
 
-### If uploads hang instead of failing
+### Why uploads are capped at 32KB
 
-Requires a patched `lua/socket.lua`. LuaSocket's socket sinks called
-`sock:send(chunk)` without looping: `send()` returns the *index of the last byte
-written*, not a count, so once the kernel send buffer fills (~64KB) it writes part
-of a chunk and returns a partial index — truthy, so the pump treated it as success
-and dropped the rest. Bodies under one buffer always worked; larger ones arrived
-truncated while `content-length` still advertised the full length, and the server
-waited for bytes that never came until the request timed out.
+A single ~144KB POST never arrived: the server saw the headers, waited for a body
+that stopped partway, and the request died at the client timeout. Keeping every
+request well under one socket buffer avoids it, which is what the 32KB cap is for.
 
-Fixed in `lua/socket.lua` and `socket/http.lua` (originals kept beside them as
-`*.orig-partialsend`). It's a bundled MUSHclient library, not part of this plugin,
-so a client update may revert it — if large syncs start hanging again, that's the
-first thing to check.
+Worth recording, since the obvious fix is wrong here: the usual culprit is
+LuaSocket's sinks calling `sock:send(chunk)` without looping, because `send()`
+returns the *index of the last byte written* rather than a count. **That does not
+apply on MUSHclient's HTTPS path.** MUSHclient doesn't use stock LuaSec — it ships
+a BIO-based shim (`lua/ssl.lua`) whose `send` is `bio:write(m) and bio:flush()`,
+all-or-nothing, and which returns a flag rather than a byte index. Wrapping it in
+a `while sent < #data` loop makes `sent` never advance, so it re-sends the same
+tail until the peer closes the connection — a 25KB batch fails with `closed`.
+
+So don't "fix" `lua/socket.lua` for this. The root cause on this transport is
+still unconfirmed (the body also crosses a thread boundary via llthreads before
+LuaSocket sees it); the size cap sidesteps it.
 
 Database: `SolaoLoot.db` in the world-files directory. Window-less — it's capture
 triggers plus a SQLite DB and the `loot` query commands.
