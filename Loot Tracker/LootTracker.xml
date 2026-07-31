@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.6"
+   version="3.7"
 >
 </plugin>
 
@@ -200,6 +200,7 @@ local function opendb ()
          room       TEXT,
          count      INTEGER NOT NULL DEFAULT 1,
          last_seen  INTEGER,
+         synced     INTEGER NOT NULL DEFAULT 0,
          PRIMARY KEY (item, mob)
       );
       CREATE TABLE IF NOT EXISTS shop_stock (
@@ -212,6 +213,7 @@ local function opendb ()
          price      INTEGER,
          level      INTEGER,
          last_seen  INTEGER,
+         synced     INTEGER NOT NULL DEFAULT 0,
          PRIMARY KEY (item, roomid)
       );
       CREATE TABLE IF NOT EXISTS gathered (
@@ -223,6 +225,7 @@ local function opendb ()
          room       TEXT,
          count      INTEGER NOT NULL DEFAULT 1,
          last_seen  INTEGER,
+         synced     INTEGER NOT NULL DEFAULT 0,
          PRIMARY KEY (item, source, roomid)
       );
       CREATE TABLE IF NOT EXISTS item_stats (
@@ -258,6 +261,7 @@ local function opendb ()
          poison INTEGER, shadow INTEGER, slash INTEGER, sonic INTEGER, water INTEGER,
          full_id     INTEGER NOT NULL DEFAULT 0,
          last_id     INTEGER,
+         synced     INTEGER NOT NULL DEFAULT 0,
          PRIMARY KEY (item)
       );
       CREATE INDEX IF NOT EXISTS idx_loot_item ON loot(item);
@@ -272,7 +276,17 @@ local function opendb ()
       "ALTER TABLE shop_stock ADD COLUMN level INTEGER;",
       "ALTER TABLE loot ADD COLUMN item_color TEXT;",
       "ALTER TABLE shop_stock ADD COLUMN item_color TEXT;",
+      -- synced: 0 = the pool hasn't got this version of the row yet. Local-only,
+      -- never sent over the wire. Existing rows come in as 0 so the first sync
+      -- after upgrading still pushes everything once.
+      "ALTER TABLE loot ADD COLUMN synced INTEGER NOT NULL DEFAULT 0;",
+      "ALTER TABLE shop_stock ADD COLUMN synced INTEGER NOT NULL DEFAULT 0;",
+      "ALTER TABLE gathered ADD COLUMN synced INTEGER NOT NULL DEFAULT 0;",
+      "ALTER TABLE item_stats ADD COLUMN synced INTEGER NOT NULL DEFAULT 0;",
    }) do pcall(function () db:exec(a) end) end
+   for _, t in ipairs({ "loot", "shop_stock", "gathered", "item_stats" }) do
+      pcall(function () db:exec("CREATE INDEX IF NOT EXISTS idx_"..t.."_synced ON "..t.."(synced);") end)
+   end
 end
 
 -- do we already have a full appraisal for this item?
@@ -348,7 +362,7 @@ function on_loot (name, line, wildcards, styles)
       "INSERT OR IGNORE INTO loot (item,item_color,mob,zone,roomid,room,count,last_seen) VALUES (%s,%s,%s,%s,%d,%s,0,%d);",
       q(item), q(citem), q(mob), q(zone), roomid, q(room), os.time()))
    db:exec(string.format(
-      "UPDATE loot SET count=count+1, zone=%s, roomid=%d, room=%s, last_seen=%d WHERE item=%s AND mob=%s;",
+      "UPDATE loot SET count=count+1, zone=%s, roomid=%d, room=%s, last_seen=%d, synced=0 WHERE item=%s AND mob=%s;",
       q(zone), roomid, q(room), os.time(), q(item), q(mob)))
    if citem ~= "" then
       db:exec(string.format("UPDATE loot SET item_color=%s WHERE item=%s AND mob=%s;", q(citem), q(item), q(mob)))
@@ -367,7 +381,7 @@ function on_shop (name, line, wildcards, styles)
       "INSERT OR IGNORE INTO shop_stock (item,item_color,keeper,zone,roomid,room,price,level,last_seen) VALUES (%s,%s,'',%s,%d,%s,%d,%d,%d);",
       q(item), q(citem), q(zone), roomid, q(room), pr, lv, os.time()))
    db:exec(string.format(
-      "UPDATE shop_stock SET price=%d, level=%d, zone=%s, room=%s, last_seen=%d WHERE item=%s AND roomid=%d;",
+      "UPDATE shop_stock SET price=%d, level=%d, zone=%s, room=%s, last_seen=%d, synced=0 WHERE item=%s AND roomid=%d;",
       pr, lv, q(zone), q(room), os.time(), q(item), roomid))
    if citem ~= "" then
       db:exec(string.format("UPDATE shop_stock SET item_color=%s WHERE item=%s AND roomid=%d;", q(citem), q(item), roomid))
@@ -381,7 +395,7 @@ local function record_gather (item, citem, source)
       "INSERT OR IGNORE INTO gathered (item,item_color,source,zone,roomid,room,count,last_seen) VALUES (%s,%s,%s,%s,%d,%s,0,%d);",
       q(item), q(citem), q(source), q(zone), roomid, q(room), os.time()))
    db:exec(string.format(
-      "UPDATE gathered SET count=count+1, zone=%s, room=%s, last_seen=%d WHERE item=%s AND source=%s AND roomid=%d;",
+      "UPDATE gathered SET count=count+1, zone=%s, room=%s, last_seen=%d, synced=0 WHERE item=%s AND source=%s AND roomid=%d;",
       q(zone), q(room), os.time(), q(item), q(source), roomid))
    if citem ~= "" then
       db:exec(string.format("UPDATE gathered SET item_color=%s WHERE item=%s AND source=%s AND roomid=%d;",
@@ -607,6 +621,7 @@ local function id_store ()
       vals[#vals+1] = lit
       if k ~= "item" then sets[#sets+1] = k .. "=" .. lit end
    end
+   sets[#sets+1] = "synced=0"      -- fresh stats: the pool needs this version
    db:exec(string.format("INSERT OR IGNORE INTO item_stats (%s) VALUES (%s);",
       table.concat(cols, ","), table.concat(vals, ",")))
    -- only overwrite the columns this identify actually produced
@@ -853,10 +868,16 @@ local function serialize_db ()
    return json.encode(data), rows
 end
 
--- merge a shared JSON dump into the DB (existing rows kept). returns added, seen
-local function merge_dump (text)
+-- Merge a shared JSON dump into the DB (existing rows kept). Returns added, seen.
+--
+-- from_pool matters for the sync flag. Rows pulled from the API are already in the
+-- pool, so they land synced and the next upload won't ship everyone else's data
+-- back. Rows from a clanmate's file are NOT necessarily in the pool, so they land
+-- unsynced and get contributed on the next upload.
+local function merge_dump (text, from_pool)
    local ok, data = pcall(json.decode, tostring(text or ""))
    if not ok or type(data) ~= "table" then return 0, 0 end
+   local flag = from_pool and "1" or "0"
    local before, seen = db:total_changes(), 0
    db:exec("BEGIN")
    for _, tbl in ipairs(SHARE_ORDER) do
@@ -866,7 +887,7 @@ local function merge_dump (text)
             if type(o) == "table" then
                local qs = {}
                for _, c in ipairs(cols) do local v = o[c]; qs[#qs+1] = q(v == nil and "" or v) end
-               db:exec("INSERT OR IGNORE INTO "..tbl.." ("..table.concat(cols, ",")..") VALUES ("..table.concat(qs, ",")..")")
+               db:exec("INSERT OR IGNORE INTO "..tbl.." ("..table.concat(cols, ",")..",synced) VALUES ("..table.concat(qs, ",")..","..flag..")")
                seen = seen + 1
             end
          end
@@ -893,7 +914,7 @@ local function do_import (fn)
    local f = io.open(GetInfo(66) .. fn, "r")
    if not f then ColourNote("red","", TITLE..": can't read "..fn); return end
    local text = f:read("*a"); f:close()
-   local added, seen = merge_dump(text)
+   local added, seen = merge_dump(text, false)
    ColourNote("green","", TITLE..": imported "..fn.." -- "..added.." new row(s) ("..seen.." read, duplicates kept).")
 end
 
@@ -1010,64 +1031,78 @@ end
 local MAX_BODY     = 32768   -- hard ceiling per POST, half a socket buffer
 local UPLOAD_READ  = 200     -- rows to consider per slice
 
--- Rows from `tbl` starting at `offset`, taking as many as fit in MAX_BODY.
--- Returns the body and how many rows it actually covers (never 0 unless dry).
+-- how many rows in `tbl` the pool hasn't seen in their current form
+local function pending_of (tbl)
+   for r in db:nrows("SELECT COUNT(*) AS n FROM "..tbl.." WHERE synced=0") do return r.n end
+   return 0
+end
+local function pending_all ()
+   local n = 0
+   for _, t in ipairs(SHARE_ORDER) do n = n + pending_of(t) end
+   return n
+end
+
+-- The next unsynced slice of `tbl`, taking as many rows as fit in MAX_BODY.
+-- Returns body, rowid list. No OFFSET needed: a sent row gets marked synced, so
+-- it drops out of this query and the next call naturally sees the following rows.
+-- That makes a half-finished upload resume exactly where it stopped.
 -- Each row is encoded on its own and joined, so the length we measure is the
 -- length we send -- no second encoding pass to drift away from content-length.
-local function serialize_slice (tbl, offset)
+local function serialize_slice (tbl)
    local cols = SHARE_COLS[tbl]
-   local parts, used, bytes = {}, 0, 0
-   for r in db:nrows("SELECT "..table.concat(cols, ",").." FROM "..tbl
-                     .." ORDER BY rowid LIMIT "..UPLOAD_READ.." OFFSET "..offset) do
+   local parts, ids, bytes = {}, {}, 0
+   for r in db:nrows("SELECT rowid AS rid,"..table.concat(cols, ",").." FROM "..tbl
+                     .." WHERE synced=0 ORDER BY rowid LIMIT "..UPLOAD_READ) do
       local o = {}
       for _, c in ipairs(cols) do o[c] = r[c] end
       local enc = json.encode(o)
       -- always take at least one row, even if that row is enormous on its own
-      if used > 0 and (bytes + #enc) > MAX_BODY then break end
+      if #ids > 0 and (bytes + #enc) > MAX_BODY then break end
       parts[#parts+1] = enc
+      ids[#ids+1] = r.rid
       bytes = bytes + #enc + 1
-      used  = used + 1
    end
-   if used == 0 then return nil, 0 end
-   return '{"'..tbl..'":['..table.concat(parts, ",")..']}', used
+   if #ids == 0 then return nil, nil end
+   return '{"'..tbl..'":['..table.concat(parts, ",")..']}', ids
+end
+
+local function mark_synced (tbl, ids)
+   db:exec("UPDATE "..tbl.." SET synced=1 WHERE rowid IN ("..table.concat(ids, ",")..")")
 end
 
 local function do_upload ()
    if not (need_api() and need_auth()) then return end
 
-   local totals, grand = {}, 0
-   for _, t in ipairs(SHARE_ORDER) do
-      totals[t] = count_of(t)
-      grand = grand + totals[t]
+   local grand = pending_all()
+   if grand == 0 then
+      ColourNote("silver","", TITLE..": nothing new to upload -- the pool already has everything here.")
+      return
    end
-   if grand == 0 then ColourNote("silver","", TITLE..": nothing to upload."); return end
-   ColourNote("silver","", TITLE..": uploading "..grand.." rows...")
+   ColourNote("silver","", TITLE..": uploading "..grand.." new/changed rows...")
 
-   local ti, off, sent, batch = 1, 0, 0, 0
+   local ti, sent, batch = 1, 0, 0
    local function step ()
-      -- advance past tables we've finished (or that were empty)
-      while ti <= #SHARE_ORDER and off >= (totals[SHARE_ORDER[ti]] or 0) do
-         ti, off = ti + 1, 0
-      end
+      -- move past tables with nothing pending
+      while ti <= #SHARE_ORDER and pending_of(SHARE_ORDER[ti]) == 0 do ti = ti + 1 end
       if ti > #SHARE_ORDER then
          ColourNote("green","", string.format("%s: upload ok -- %d rows in %d batches.", TITLE, sent, batch))
          return
       end
 
       local tbl = SHARE_ORDER[ti]
-      local body, used = serialize_slice(tbl, off)
-      if not body then ti, off = ti + 1, 0; step(); return end
+      local body, ids = serialize_slice(tbl)
+      if not body then ti = ti + 1; step(); return end
       batch = batch + 1
-      local n = used
+      local n = #ids
       loot_request("POST", body, function (rc, page, status)
          if status == 200 then
-            sent, off = sent + n, off + n
-            ColourNote("silver","", string.format("%s: %s %d/%d  (%d/%d rows)",
-               TITLE, tbl, math.min(off, totals[tbl]), totals[tbl], sent, grand))
+            mark_synced(tbl, ids)         -- only after the server confirms it
+            sent = sent + n
+            ColourNote("silver","", string.format("%s: %s  +%d  (%d/%d)", TITLE, tbl, n, sent, grand))
             step()
          elseif status == 408 then
-            -- server stopped seeing body bytes: transport, not auth. Re-running
-            -- resumes, since the merge ignores rows already in the pool.
+            -- server stopped seeing body bytes: transport, not auth. Nothing is
+            -- marked, so re-running picks up exactly these rows again.
             ColourNote("orange","", string.format("%s: batch %d (%s) stalled in transit (408). %d rows are in; run 'loot upload' again to resume.",
                TITLE, batch, tbl, sent))
          else
@@ -1084,7 +1119,7 @@ local function do_update ()
    ColourNote("silver","", TITLE..": fetching the shared pool...")
    loot_request("GET", nil, function (rc, page, status)
       if status == 200 and type(page) == "string" then
-         local added, seen = merge_dump(page)
+         local added, seen = merge_dump(page, true)
          ColourNote("green","", TITLE..": update ok -- "..added.." new row(s) ("..seen.." read).")
       else ColourNote("orange","", TITLE..": update failed (status "..tostring(status)..").") end
    end)
@@ -1101,6 +1136,9 @@ function lt_cmd (arg)
       ColourNote("white","", "  shop rows : "..count_of("shop_stock"))
       ColourNote("white","", "  gathered  : "..count_of("gathered"))
       ColourNote("white","", "  id'd items: "..count_of("item_stats").."  (auto-id "..(cfg_autoid and "on" or "off")..")")
+      local pend = pending_all()
+      ColourNote(pend > 0 and "yellow" or "green","",
+         "  to sync   : "..pend..(pend > 0 and "  ('loot upload')" or "  (pool is current)"))
 
    elseif verb == "item" then show_item(rest)
    elseif verb == "mob"  then show_mob(rest)
@@ -1151,6 +1189,19 @@ function lt_cmd (arg)
    elseif verb == "api" then
       ColourNote("cyan","", TITLE..": API = "..(api_url() ~= "" and api_url() or "(disabled in this build)"))
       ColourNote("white","", "  auth  : "..(auth_key() ~= "" and ("yes, as "..(GetVariable("authname") or "?")) or "no -- run 'loot auth'"))
+      for _, t in ipairs(SHARE_ORDER) do
+         ColourNote("white","", string.format("  %-11s %d of %d to sync", t, pending_of(t), count_of(t)))
+      end
+
+   -- forget what we've sent, so the next upload re-sends the lot. For when the
+   -- pool got wiped server-side and our flags no longer reflect reality.
+   elseif verb == "resync" then
+      if trim(rest):lower() ~= "yes" then
+         ColourNote("silver","", TITLE..": 'loot resync yes' re-sends everything on the next upload ("..count_of("loot")+count_of("shop_stock")+count_of("gathered")+count_of("item_stats").." rows).")
+      else
+         for _, t in ipairs(SHARE_ORDER) do db:exec("UPDATE "..t.." SET synced=0;") end
+         ColourNote("green","", TITLE..": all rows marked unsynced -- 'loot upload' will re-send everything.")
+      end
 
    elseif verb == "clear" then
       if rest == "loot" then db:exec("DELETE FROM loot;"); ColourNote("green","","Loot table cleared.")
@@ -1177,7 +1228,8 @@ function lt_cmd (arg)
          "  loot recent        - last 15 things looted",
          "  loot export [file] - dump the DB to a file to share (no game traffic)",
          "  loot import <file> - merge a shared export (existing rows kept)",
-         "  loot api           - show the shared-API endpoint + your auth status",
+         "  loot api           - endpoint, auth status, per-table sync backlog",
+         "  loot resync yes    - forget sync flags; re-send everything next upload",
          "  loot auth          - register this character with the pool (one time)",
          "  loot upload        - push your DB to the shared pool (needs auth)",
          "  loot update        - pull + merge the shared pool (needs auth)",

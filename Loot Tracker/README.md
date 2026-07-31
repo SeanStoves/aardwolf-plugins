@@ -74,6 +74,7 @@ marks them *partial*, so it's easy to re-identify them later.
 | `loot del <item> [roomid]` | remove matching rows (roomid scopes to one room) |
 | `loot bags [add\|del <word>]` | container words ignored for gathers |
 | `loot recent` | last 15 things looted |
+| `loot resync yes` | forget sync flags; re-send everything next upload |
 | `loot clear loot\|shop\|gathered\|stats` | wipe a table |
 | `loot help` | command list |
 
@@ -102,6 +103,23 @@ and your auth status.
 
 Nothing contacts the API until you run `loot auth`, so it stays quiet until you
 opt in. The service itself is a separate project.
+
+**Only new work is sent.** Every row carries a local `synced` flag. A row is
+uploaded once, then skipped; touching it again (a fresh loot bumping `count`, a
+shop reprice, a better identify) clears the flag so the updated version goes next
+time. Rows pulled down with `loot update` land already-synced, so nobody's data
+bounces back to the pool. Rows merged from a clanmate's *file* land unsynced,
+since the pool hasn't necessarily seen those.
+
+The practical effect: the first sync ships everything, and after that a session's
+worth of new drops is a few hundred bytes instead of the whole database. `loot`
+shows the backlog, `loot api` breaks it down per table, and `loot resync yes`
+clears every flag to force a full re-send (for when the pool was wiped
+server-side and the local flags no longer reflect reality).
+
+Uploads go out in slices capped at 32KB of encoded JSON — a failed batch stops
+there, reports how many rows landed, and re-running resumes exactly where it
+stopped. Nothing is marked synced until the server confirms that batch.
 
 Database: `SolaoLoot.db` in the world-files directory. Window-less — it's capture
 triggers plus a SQLite DB and the `loot` query commands.
