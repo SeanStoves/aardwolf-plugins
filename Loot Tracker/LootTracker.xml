@@ -10,7 +10,7 @@
    requires="5.07"
    save_state="y"
    date_written="2026-07-23"
-   version="3.3"
+   version="3.4"
 >
 </plugin>
 
@@ -310,6 +310,16 @@ local function colored_from (styles, pat)
    local ok, full = pcall(StylesToColours, styles)
    if not ok or type(full) ~= "string" then return "" end
    return trim(full:match(pat) or "")
+end
+
+-- print an @-coded string with its colours rendered. ColourNote takes colour names,
+-- not @ codes, so a stored item_color has to go out through ANSI.
+local function note_colored (s, plain)
+   if s and s ~= "" and ok_colors and ColoursToANSI then
+      local ok = pcall(function () AnsiNote(ColoursToANSI(s)) end)
+      if ok then return end
+   end
+   ColourNote("cyan","", plain or s or "")
 end
 
 -- current room from GMCP
@@ -695,13 +705,14 @@ local function show_stats (term)
    local n = 0
    for r in db:nrows("SELECT * FROM item_stats WHERE item LIKE "..q("%"..term.."%").." ORDER BY level DESC LIMIT 10") do
       n = n + 1
-      ColourNote("cyan","", (r.item_color and r.item_color ~= "" and r.item_color or r.item))
+      note_colored(r.item_color, r.item)
       local head = {}
       if r.type   then head[#head+1] = r.type end
       if r.level  then head[#head+1] = "L"..r.level end
-      if r.score  then head[#head+1] = r.score.." score" end
-      if r.worth  then head[#head+1] = r.worth.."g" end
-      if r.weight then head[#head+1] = r.weight.." wt" end
+      -- 0 is truthy in Lua, and a zero score/worth/weight is just noise
+      if (r.score  or 0) > 0 then head[#head+1] = r.score.." score" end
+      if (r.worth  or 0) > 0 then head[#head+1] = r.worth.."g" end
+      if (r.weight or 0) > 0 then head[#head+1] = r.weight.." wt" end
       if #head > 0 then ColourNote("white","", "   "..table.concat(head, "  ")) end
       if r.wearable and r.wearable ~= "" then ColourNote("white","", "   Worn  : "..r.wearable) end
 
